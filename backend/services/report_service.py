@@ -20,7 +20,8 @@ from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, KeepTogether
 )
 from reportlab.pdfgen import canvas
-from backend.database.db import get_record, get_record_audit_logs
+from backend.database.db import get_record, get_record_audit_logs, get_record_version_snapshot
+from backend.services.confidence_service import ReportConfidenceService
 
 REPORTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "reports"))
 os.makedirs(REPORTS_DIR, exist_ok=True)
@@ -87,12 +88,20 @@ class NumberedCanvas(canvas.Canvas):
 class ReportService:
 
     @classmethod
-    def generate_json_report(cls, record_id):
+    def generate_json_report(cls, record_id, version_num=None):
         """
         Build full structured JSON export.
-        Strictly excludes internal evaluation accuracy metrics from patient reports.
+        Supports specific version export (?version=N) to ensure V1 and V2 exports match exact snapshots.
+        Includes transparent overall report quality/confidence level while strictly excluding internal evaluation metrics.
         """
-        record = get_record(record_id)
+        if version_num is not None:
+            snap = get_record_version_snapshot(record_id, version_num)
+            record = snap.get("snapshot_json") if snap else None
+            if not record:
+                record = get_record(record_id)
+        else:
+            record = get_record(record_id)
+
         if not record:
             return None
 
@@ -104,12 +113,19 @@ class ReportService:
         clean_record.pop("aggregate_scores", None)
         clean_record.pop("model_eval_summary", None)
 
+        # Overall Report Quality & Confidence Assessment
+        report_quality = ReportConfidenceService.evaluate_record_quality(clean_record)
+
         report_payload = {
             "export_metadata": {
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "system": "Field-to-Record EMS Documentation Assistant",
                 "system_version": "1.2.0",
                 "schema": "PreHospitalCareReport-v1",
+                "version": clean_record.get("version", 1),
+                "version_exported": clean_record.get("version", 1),
+                "is_historical_version": bool(version_num and version_num != clean_record.get("version")),
+                "report_quality_confidence": report_quality,
                 "notice": "Documentation assistant record. Not a diagnostic or treatment recommendation system."
             },
             "record": clean_record,
@@ -208,17 +224,26 @@ class ReportService:
         return bundle
 
     @classmethod
-    def generate_pdf_report(cls, record_id, output_filename=None):
+    def generate_pdf_report(cls, record_id, output_filename=None, version_num=None):
         """
         Generate an upgraded, professional clinical PDF report using ReportLab.
+        Supports specific version export (version_num=N) to ensure V1 and V2 exports match exact snapshots.
         Uses compact padding, elegant medical typography, and automatic cell wrapping.
         """
-        record = get_record(record_id)
+        if version_num is not None:
+            snap = get_record_version_snapshot(record_id, version_num)
+            record = snap.get("snapshot_json") if snap else None
+            if not record:
+                record = get_record(record_id)
+        else:
+            record = get_record(record_id)
+
         if not record:
             return None
 
         if not output_filename:
-            output_filename = f"report_{record_id}_{int(datetime.now().timestamp())}.pdf"
+            ver_suffix = f"_v{record.get('version', 1)}" if record.get('version') else ""
+            output_filename = f"report_{record_id}{ver_suffix}_{int(datetime.now().timestamp())}.pdf"
 
         pdf_path = os.path.join(REPORTS_DIR, output_filename)
 
@@ -338,6 +363,17 @@ class ReportService:
         created_formatted = format_clean_timestamp(record.get("created_at"))
         approved_formatted = format_clean_timestamp(record.get("approved_at"))
 
+        # Overall Report Quality & Confidence Assessment
+        report_quality = ReportConfidenceService.evaluate_record_quality(record)
+        q_level = report_quality.get("level", "HIGH")
+        q_color = (
+            "#166534" if q_level == "HIGH" else
+            "#92400e" if q_level == "MEDIUM" else
+            "#b91c1c" if q_level == "LOW" else "#475569"
+        )
+        q_score_str = f" ({report_quality['score_percent']}%)" if report_quality.get("score_percent") is not None else ""
+        q_html = f'<font color="{q_color}"><b>{q_level}</b></font>{q_score_str}'
+
         # Metadata Table (Width: 100 + 166 + 100 + 166 = 532 pt)
         meta_data = [
             [
@@ -357,6 +393,12 @@ class ReportService:
                 Paragraph(created_formatted, cell_regular),
                 Paragraph("<b>APPROVED AT:</b>", cell_bold),
                 Paragraph(approved_formatted, cell_regular)
+            ],
+            [
+                Paragraph("<b>REPORT QUALITY:</b>", cell_bold),
+                Paragraph(q_html, cell_bold),
+                Paragraph("<b>QUALITY AUDIT:</b>", cell_bold),
+                Paragraph(f"{report_quality.get('summary', '')[:60]}...", cell_italic)
             ]
         ]
         meta_table = Table(meta_data, colWidths=[90, 176, 90, 176])
@@ -460,10 +502,11 @@ class ReportService:
             elements.append(Paragraph("<i>No medications documented in encounter narrative.</i>", cell_italic))
         elements.append(Spacer(1, 5))
 
-        # 6. Symptoms & Pre-Hospital Interventions (Width: 80 + 130 + 122 + 200 = 532)
+        # 6. Symptoms, Examinations & Pre-Hospital Interventions (Width: 80 + 130 + 122 + 200 = 532)
         symptoms = clinical_data.get("symptoms", [])
         procedures = clinical_data.get("procedures", [])
-        elements.append(Paragraph("Symptoms & Pre-Hospital Interventions", section_style))
+        examinations = clinical_data.get("examinations", [])
+        elements.append(Paragraph("Symptoms, Clinical Observations & Interventions", section_style))
         sp_rows = [[
             Paragraph("Category", header_cell),
             Paragraph("Finding / Intervention", header_cell),
@@ -482,6 +525,13 @@ class ReportService:
                 Paragraph(neg_badge, cell_regular),
                 Paragraph(f"\"{s.get('source_phrase', '')}\"", cell_italic)
             ])
+        for ex in examinations:
+            sp_rows.append([
+                Paragraph(f"Exam: {ex.get('system', 'General')}", cell_regular),
+                Paragraph(ex.get("finding", ""), cell_bold),
+                Paragraph(f'<b>{ex.get("verification_state", "Extracted")}</b>', cell_bold),
+                Paragraph(f"\"{ex.get('source_phrase', '')}\"", cell_italic)
+            ])
         for p in procedures:
             sp_rows.append([
                 Paragraph("Procedure", cell_regular),
@@ -490,7 +540,7 @@ class ReportService:
                 Paragraph(f"\"{p.get('source_phrase', '')}\"", cell_italic)
             ])
 
-        if symptoms or procedures:
+        if symptoms or procedures or examinations:
             sp_table = Table(sp_rows, colWidths=[80, 130, 122, 200])
             sp_table.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#334155")),
@@ -501,7 +551,7 @@ class ReportService:
             ]))
             elements.append(sp_table)
         else:
-            elements.append(Paragraph("<i>No specific symptoms or procedures extracted.</i>", cell_italic))
+            elements.append(Paragraph("<i>No specific symptoms, examinations, or procedures extracted.</i>", cell_italic))
         elements.append(Spacer(1, 5))
 
         # 7. Safety & Validation Warnings Audit (Width: 65 + 115 + 242 + 110 = 532)

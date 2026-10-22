@@ -99,13 +99,14 @@ export const api = {
     return handleResponse(res);
   },
 
-  async exportJson(recordId) {
-    const res = await fetch(`${API_BASE}/api/records/${encodeURIComponent(recordId)}/export/json`);
+  async exportJson(recordId, version = null) {
+    const url = `${API_BASE}/api/records/${encodeURIComponent(recordId)}/export/json${version ? `?version=${version}` : ""}`;
+    const res = await fetch(url);
     return handleResponse(res);
   },
 
-  getPdfUrl(recordId) {
-    return `${API_BASE}/api/records/${encodeURIComponent(recordId)}/export/pdf`;
+  getPdfUrl(recordId, version = null) {
+    return `${API_BASE}/api/records/${encodeURIComponent(recordId)}/export/pdf${version ? `?version=${version}` : ""}`;
   },
 
   getAudioUrl(filename) {

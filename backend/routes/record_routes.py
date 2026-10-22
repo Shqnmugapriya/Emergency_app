@@ -166,6 +166,9 @@ def get_single_record(record_id):
     audit_logs = get_record_audit_logs(record_id)
     rec["audit_trail"] = audit_logs
 
+    from backend.services.confidence_service import ReportConfidenceService
+    rec["report_confidence"] = ReportConfidenceService.evaluate_record_quality(rec)
+
     return jsonify({
         "success": True,
         "data": rec
@@ -383,10 +386,37 @@ def amend_record(record_id):
 
     actor = body.get("responder_id") or rec.get("responder_id")
     now_iso = datetime.now(timezone.utc).isoformat()
-    new_version = rec.get("version", 1) + 1
+    current_ver = rec.get("version", 1)
+    new_version = current_ver + 1
+
+    # 1. Ensure the previous approved version (e.g. V1) is preserved as an immutable snapshot
+    existing_snap = get_record_version_snapshot(record_id, current_ver)
+    if not existing_snap:
+        save_record_version_snapshot(
+            record_id=record_id,
+            version_num=current_ver,
+            snapshot_dict=rec,
+            approved_by=rec.get("responder_id", "First Responder"),
+            amendment_reason=None
+        )
 
     corrected_transcript = body.get("corrected_transcript", rec["corrected_transcript"])
-    clinical_data = body.get("clinical_data", rec["clinical_data"])
+
+    # 2. Re-extract clinical entities from amended transcript so newly added findings are captured
+    extracted = ClinicalExtractor.extract_all(corrected_transcript)
+    incoming_clinical = body.get("clinical_data")
+    if incoming_clinical and isinstance(incoming_clinical, dict):
+        clinical_data = extracted
+        # Retain any user verification states from previous reviews where IDs or canonical names match
+        for cat in ("vital_signs", "medications", "symptoms", "procedures", "examinations"):
+            incoming_items = incoming_clinical.get(cat, [])
+            incoming_map = {item.get("id"): item for item in incoming_items if item.get("id")}
+            for item in clinical_data.get(cat, []):
+                if item.get("id") in incoming_map:
+                    item["verification_state"] = incoming_map[item["id"]].get("verification_state", item["verification_state"])
+    else:
+        clinical_data = extracted
+
     validation_warnings = ValidationService.validate_clinical_record(clinical_data)
 
     evidence_passport = EvidencePassportService.compile_evidence_passport(
@@ -405,11 +435,14 @@ def amend_record(record_id):
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
+        # Requirement 8 & 9: Approval applies to a specific version.
+        # An amended version resets to 'Needs Review' with approved_at = NULL until approved.
         cursor.execute("""
             UPDATE records SET
-                status = 'Amended',
+                status = 'Needs Review',
                 version = ?,
                 updated_at = ?,
+                approved_at = NULL,
                 corrected_transcript = ?,
                 clinical_data = ?,
                 validation_warnings = ?,
@@ -433,6 +466,7 @@ def amend_record(record_id):
             action="AMEND",
             actor=actor,
             details={
+                "previous_version": current_ver,
                 "new_version": new_version,
                 "reason": amendment_reason,
                 "amended_at": now_iso
@@ -441,7 +475,7 @@ def amend_record(record_id):
 
         amended = get_record(record_id)
 
-        # Snapshot newly amended version
+        # Snapshot newly amended version linked to the amendment reason
         save_record_version_snapshot(
             record_id=record_id,
             version_num=new_version,
@@ -452,7 +486,7 @@ def amend_record(record_id):
 
         return jsonify({
             "success": True,
-            "message": f"Record amended to version {new_version}.",
+            "message": f"Record amended to version {new_version}. Review and approval required for the new version.",
             "data": amended
         }), 200
     finally:
@@ -469,7 +503,8 @@ def get_record_version_list(record_id):
         "success": True,
         "record_id": record_id,
         "count": len(versions),
-        "data": versions
+        "data": versions,
+        "versions": versions
     }), 200
 
 @record_bp.route("/api/records/<record_id>/versions/<int:version_num>", methods=["GET"])
@@ -493,24 +528,27 @@ def export_fhir(record_id):
 
 @record_bp.route("/api/records/<record_id>/export/json", methods=["GET"])
 def export_json(record_id):
-    """Export complete structured JSON report."""
-    report = ReportService.generate_json_report(record_id)
+    """Export complete structured JSON report. Supports ?version=N for specific historical version."""
+    version_num = request.args.get("version", type=int)
+    report = ReportService.generate_json_report(record_id, version_num=version_num)
     if not report:
-        return jsonify({"success": False, "error": "Record not found."}), 404
+        return jsonify({"success": False, "error": "Record or version not found."}), 404
     return jsonify(report), 200
 
 @record_bp.route("/api/records/<record_id>/export/pdf", methods=["GET"])
 def export_pdf(record_id):
-    """Generate and serve clinical PDF report."""
+    """Generate and serve clinical PDF report. Supports ?version=N for specific historical version."""
     rec = get_record(record_id)
     if not rec:
         return jsonify({"success": False, "error": "Record not found."}), 404
 
-    pdf_path = ReportService.generate_pdf_report(record_id)
+    version_num = request.args.get("version", type=int)
+    pdf_path = ReportService.generate_pdf_report(record_id, version_num=version_num)
     if not pdf_path or not os.path.exists(pdf_path):
         return jsonify({"success": False, "error": "Failed to compile PDF report."}), 500
 
-    filename = f"field_to_record_{record_id}.pdf"
+    ver_suffix = f"_v{version_num}" if version_num is not None else f"_v{rec.get('version', 1)}"
+    filename = f"field_to_record_{record_id}{ver_suffix}.pdf"
     return send_file(
         pdf_path,
         mimetype="application/pdf",

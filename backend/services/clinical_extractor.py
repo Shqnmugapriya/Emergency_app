@@ -57,6 +57,7 @@ class ClinicalExtractor:
                 "medications": [],
                 "symptoms": [],
                 "procedures": [],
+                "examinations": [],
                 "timestamps": [],
                 "raw_text": ""
             }
@@ -67,6 +68,7 @@ class ClinicalExtractor:
         meds = cls.extract_medications(text)
         symptoms = cls.extract_symptoms(text)
         procedures = cls.extract_procedures(text)
+        examinations = cls.extract_examinations(text)
         timestamps = cls.extract_timestamps(text)
 
         return {
@@ -74,6 +76,7 @@ class ClinicalExtractor:
             "medications": meds,
             "symptoms": symptoms,
             "procedures": procedures,
+            "examinations": examinations,
             "timestamps": timestamps,
             "raw_text": text
         }
@@ -113,7 +116,7 @@ class ClinicalExtractor:
             for m in re.finditer(pat, text):
                 start, end = m.start(), m.end()
                 # Deduplicate overlapping spans (e.g. prevents "130/85" duplicating "blood pressure 130/85")
-                if any(start >= s and end <= e for s, e in bp_spans) or any(s >= start and e <= end for s, e in bp_spans):
+                if any(max(start, s) < min(end, e) for s, e in bp_spans):
                     continue
                 sys_val = int(m.group(1))
                 dia_val = int(m.group(2))
@@ -427,6 +430,74 @@ class ClinicalExtractor:
                 })
 
         return procedures
+
+    @classmethod
+    def extract_examinations(cls, text):
+        """
+        Extract physical examination and clinical observation findings.
+        Maps observations (e.g. cardiac rhythm, breath sounds, pupils, abdomen)
+        into structured examination fields while marking them for explicit clinician verification.
+        Never infers that a measurement is clinically normal merely because the transcript says so.
+        """
+        examinations = []
+        exam_patterns = [
+            (
+                "Cardiovascular",
+                "Heart Rhythm / Cardiac Examination",
+                r"(?i)\b(?:heartbeat|heart rate|heart sounds|cardiac rhythm|pulse rhythm|heart rhythm)\s*(?:is|was|noted as|documented as|appears|found to be)?\s*(normal|regular|irregular|abnormal|rapid|slow|arrhythmic|weak|bounding|thready|palpable|absent)\b"
+            ),
+            (
+                "Cardiovascular",
+                "Cardiac Rhythm",
+                r"(?i)\b(normal sinus rhythm|regular rate and rhythm|sinus tachycardia|sinus bradycardia|atrial fibrillation|asystole)\b"
+            ),
+            (
+                "Respiratory",
+                "Breath / Lung Sounds",
+                r"(?i)\b(?:breath sounds|lung sounds|auscultation|lungs)\s*(?:are|were|noted as|documented as)?\s*(clear|clear bilaterally|wheezing|wheezes|crackles|rales|rhonchi|diminished|absent|stridor)\b"
+            ),
+            (
+                "Neurological",
+                "Pupillary Assessment",
+                r"(?i)\b(?:pupils|pupillary response)\s*(?:are|were|noted as)?\s*(equal round and reactive|perrl|sluggish|fixed and dilated|pinpoint|constricted|dilated|reactive)\b"
+            ),
+            (
+                "Abdomen",
+                "Abdominal Examination",
+                r"(?i)\b(?:abdomen|abdominal examination|belly)\s*(?:is|was|noted as)?\s*(soft non-tender|soft and non-tender|rigid|distended|tender|guarding|rebound)\b"
+            ),
+            (
+                "Integumentary",
+                "Skin Assessment",
+                r"(?i)\b(?:skin)\s*(?:is|was|noted as)?\s*(warm and dry|pale and clammy|cool and diaphoretic|cyanotic|flushed|jaundiced|turgor normal)\b"
+            )
+        ]
+
+        found_spans = []
+        for system, exam_name, pat in exam_patterns:
+            for m in re.finditer(pat, text):
+                start, end = m.start(), m.end()
+                if any(max(start, s) < min(end, e) for s, e in found_spans):
+                    continue
+                found_spans.append((start, end))
+
+                finding_text = m.group(0).strip()
+                val_text = m.group(1).strip() if m.groups() else finding_text
+
+                examinations.append({
+                    "id": f"exam-{uuid.uuid4().hex[:6]}",
+                    "system": system,
+                    "exam": exam_name,
+                    "finding": finding_text,
+                    "value": val_text,
+                    "documented_value": val_text,
+                    "source_phrase": finding_text,
+                    "char_start": start,
+                    "char_end": end,
+                    "verification_state": "Extracted"  # Flagged for clinician verification; not assumed medically approved
+                })
+
+        return examinations
 
     @classmethod
     def extract_timestamps(cls, text):

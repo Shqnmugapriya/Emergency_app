@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import {
   Mic, FileText, User, Hash, AlertCircle, ArrowRight,
-  ShieldCheck, RefreshCw, CheckCircle2, Search, UserCheck
+  ShieldCheck, RefreshCw, CheckCircle2, Search, UserCheck, UserPlus, X
 } from "lucide-react";
 import { AudioRecorder } from "../components/AudioRecorder";
 import { api } from "../services/api";
@@ -21,6 +21,19 @@ export function VoiceInputPage({ onRecordCreated }) {
   const [selectedPatientId, setSelectedPatientId] = useState("");
   const [selectedPatientObj, setSelectedPatientObj] = useState(null);
   const [patientAmbiguityWarning, setPatientAmbiguityWarning] = useState(null);
+
+  // New Patient Registration modal state
+  const [showRegisterModal, setShowRegisterModal] = useState(false);
+  const [regFullName, setRegFullName] = useState("");
+  const [regDob, setRegDob] = useState("");
+  const [regGender, setRegGender] = useState("Unspecified");
+  const [regPhone, setRegPhone] = useState("");
+  const [regBloodType, setRegBloodType] = useState("Unknown");
+  const [regAllergies, setRegAllergies] = useState("");
+  const [regHistory, setRegHistory] = useState("");
+  const [regIsSubmitting, setRegIsSubmitting] = useState(false);
+  const [regError, setRegError] = useState(null);
+  const [regSuccessNotice, setRegSuccessNotice] = useState(null);
 
   // Draft recovery state
   const [recoveredDraft, setRecoveredDraft] = useState(null);
@@ -113,6 +126,70 @@ export function VoiceInputPage({ onRecordCreated }) {
       // Ignore
     }
     setRecoveredDraft(null);
+  };
+
+  // Register New Patient Handler
+  const handleRegisterPatientSubmit = async (e) => {
+    e.preventDefault();
+    if (!regFullName.trim() || !regDob.trim()) {
+      setRegError("Patient Full Name and Date of Birth (DOB) are mandatory for clinical identification.");
+      return;
+    }
+
+    setRegIsSubmitting(true);
+    setRegError(null);
+
+    try {
+      const payload = {
+        full_name: regFullName.trim(),
+        dob: regDob.trim(),
+        gender: regGender,
+        phone: regPhone.trim(),
+        blood_type: regBloodType,
+        allergies: regAllergies ? regAllergies.split(",").map((s) => s.trim()).filter(Boolean) : [],
+        medical_history: regHistory ? regHistory.split(",").map((s) => s.trim()).filter(Boolean) : []
+      };
+
+      const res = await api.registerPatient(payload);
+      if (res.success && res.data) {
+        const newPt = res.data;
+        // Prepend to patients list
+        setPatients((prev) => [newPt, ...prev]);
+        // Immediately link this patient to the active encounter
+        setSelectedPatientId(newPt.id);
+        setSelectedPatientObj(newPt);
+
+        // Auto-calculate age
+        const birthStr = newPt.dob || newPt.date_of_birth;
+        if (birthStr) {
+          const birthYear = parseInt(birthStr.split("-")[0], 10);
+          if (!isNaN(birthYear)) {
+            setPatientAge(String(new Date().getFullYear() - birthYear));
+          }
+        }
+        if (newPt.gender && newPt.gender !== "Unspecified") {
+          setPatientGender(newPt.gender);
+        }
+
+        setRegSuccessNotice(`Registered and linked patient: ${newPt.full_name} (${newPt.patient_id_display})`);
+        setShowRegisterModal(false);
+
+        // Reset registration fields
+        setRegFullName("");
+        setRegDob("");
+        setRegGender("Unspecified");
+        setRegPhone("");
+        setRegBloodType("Unknown");
+        setRegAllergies("");
+        setRegHistory("");
+      } else {
+        throw new Error(res.error || "Failed to register patient in database.");
+      }
+    } catch (err) {
+      setRegError(err.message || "Registration failed. Verify patient details.");
+    } finally {
+      setRegIsSubmitting(false);
+    }
   };
 
   // Periodic autosave of draft form fields
@@ -219,6 +296,18 @@ export function VoiceInputPage({ onRecordCreated }) {
         </div>
       )}
 
+      {regSuccessNotice && (
+        <div className="p-3 rounded-lg bg-teal-50 border border-teal-200 text-teal-800 text-xs flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-teal-600 shrink-0" />
+            <span className="font-semibold">{regSuccessNotice}</span>
+          </div>
+          <button onClick={() => setRegSuccessNotice(null)} className="text-teal-600 hover:text-teal-900">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
       {submitError && (
         <div className="p-4 rounded-lg bg-red-50 border border-red-200 text-red-800 text-sm flex items-center gap-2">
           <AlertCircle className="w-5 h-5 text-red-600 shrink-0" />
@@ -238,9 +327,22 @@ export function VoiceInputPage({ onRecordCreated }) {
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           {/* Patient Selector */}
           <div className="sm:col-span-2">
-            <label className="text-xs font-bold text-slate-600 uppercase tracking-wider block mb-1">
-              Link to Patient Profile
-            </label>
+            <div className="flex items-center justify-between mb-1">
+              <label className="text-xs font-bold text-slate-600 uppercase tracking-wider block">
+                Link to Patient Profile
+              </label>
+              <button
+                type="button"
+                onClick={() => {
+                  setRegError(null);
+                  setShowRegisterModal(true);
+                }}
+                className="text-xs font-semibold text-clinical-teal-700 hover:text-clinical-teal-900 flex items-center gap-1"
+              >
+                <UserPlus className="w-3.5 h-3.5" />
+                <span>+ Register New Patient Profile</span>
+              </button>
+            </div>
             <select
               value={selectedPatientId}
               onChange={(e) => handleSelectPatient(e.target.value)}
@@ -249,7 +351,7 @@ export function VoiceInputPage({ onRecordCreated }) {
               <option value="">-- Unidentified / Field Encounter Only --</option>
               {patients.map((pt) => (
                 <option key={pt.id} value={pt.id}>
-                  {pt.full_name} ({pt.patient_id_display}) • DOB: {pt.date_of_birth}
+                  {pt.full_name} ({pt.patient_id_display}) • DOB: {pt.date_of_birth || pt.dob}
                 </option>
               ))}
             </select>
@@ -363,6 +465,165 @@ export function VoiceInputPage({ onRecordCreated }) {
         onTranscriptionComplete={() => {}}
         onSaveDraft={handleSaveDraft}
       />
+
+      {/* Register New Patient Modal */}
+      {showRegisterModal && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2">
+                <UserPlus className="w-5 h-5 text-clinical-teal-600" />
+                <h3 className="text-base font-bold text-slate-900">
+                  Register New Patient Profile
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowRegisterModal(false)}
+                className="text-slate-400 hover:text-slate-700"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-500">
+              Registers a new patient profile directly in SQLite. Multi-factor identity validation (Name + DOB) prevents duplicate registrations.
+            </p>
+
+            {regError && (
+              <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-800 text-xs flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                <span>{regError}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleRegisterPatientSubmit} className="space-y-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="sm:col-span-2">
+                  <label className="text-xs font-bold text-slate-700 block mb-1">
+                    Full Legal Name *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={regFullName}
+                    onChange={(e) => setRegFullName(e.target.value)}
+                    placeholder="e.g. Eleanor Vance"
+                    className="w-full text-xs p-2.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-clinical-teal-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold text-slate-700 block mb-1">
+                    Date of Birth (YYYY-MM-DD) *
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={regDob}
+                    onChange={(e) => setRegDob(e.target.value)}
+                    className="w-full text-xs p-2.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-clinical-teal-500 bg-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold text-slate-700 block mb-1">
+                    Gender
+                  </label>
+                  <select
+                    value={regGender}
+                    onChange={(e) => setRegGender(e.target.value)}
+                    className="w-full text-xs p-2.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-clinical-teal-500 bg-white"
+                  >
+                    <option value="Unspecified">Unspecified</option>
+                    <option value="Female">Female</option>
+                    <option value="Male">Male</option>
+                    <option value="Other">Other</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold text-slate-700 block mb-1">
+                    Phone / Contact
+                  </label>
+                  <input
+                    type="text"
+                    value={regPhone}
+                    onChange={(e) => setRegPhone(e.target.value)}
+                    placeholder="e.g. +1-555-0192"
+                    className="w-full text-xs p-2.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-clinical-teal-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold text-slate-700 block mb-1">
+                    Blood Type
+                  </label>
+                  <select
+                    value={regBloodType}
+                    onChange={(e) => setRegBloodType(e.target.value)}
+                    className="w-full text-xs p-2.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-clinical-teal-500 bg-white"
+                  >
+                    <option value="Unknown">Unknown</option>
+                    <option value="A+">A+</option>
+                    <option value="A-">A-</option>
+                    <option value="B+">B+</option>
+                    <option value="B-">B-</option>
+                    <option value="AB+">AB+</option>
+                    <option value="AB-">AB-</option>
+                    <option value="O+">O+</option>
+                    <option value="O-">O-</option>
+                  </select>
+                </div>
+
+                <div className="sm:col-span-2">
+                  <label className="text-xs font-bold text-slate-700 block mb-1">
+                    Known Allergies (comma-separated)
+                  </label>
+                  <input
+                    type="text"
+                    value={regAllergies}
+                    onChange={(e) => setRegAllergies(e.target.value)}
+                    placeholder="e.g. Penicillin, Peanuts"
+                    className="w-full text-xs p-2.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-clinical-teal-500"
+                  />
+                </div>
+
+                <div className="sm:col-span-2">
+                  <label className="text-xs font-bold text-slate-700 block mb-1">
+                    Medical History / Chronic Conditions
+                  </label>
+                  <input
+                    type="text"
+                    value={regHistory}
+                    onChange={(e) => setRegHistory(e.target.value)}
+                    placeholder="e.g. Hypertension, Asthma"
+                    className="w-full text-xs p-2.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-clinical-teal-500"
+                  />
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2.5 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setShowRegisterModal(false)}
+                  className="px-4 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={regIsSubmitting}
+                  className="px-5 py-2 rounded-lg bg-clinical-teal-600 hover:bg-clinical-teal-700 disabled:bg-slate-300 text-white text-xs font-semibold shadow-md flex items-center gap-1.5"
+                >
+                  <UserPlus className="w-3.5 h-3.5" />
+                  <span>{regIsSubmitting ? "Registering..." : "Save & Link Patient Profile"}</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

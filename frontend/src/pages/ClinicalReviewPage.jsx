@@ -27,6 +27,7 @@ export function ClinicalReviewPage({ recordId, onBack, onNavigateTimeline }) {
     medications: [],
     symptoms: [],
     procedures: [],
+    examinations: [],
     timestamps: []
   });
   const [warnings, setWarnings] = useState([]);
@@ -42,8 +43,13 @@ export function ClinicalReviewPage({ recordId, onBack, onNavigateTimeline }) {
           const rec = res.data;
           setRecord(rec);
           setCorrectedTranscript(rec.corrected_transcript || rec.machine_transcript || "");
-          setClinicalData(rec.clinical_data || {
-            vital_signs: [], medications: [], symptoms: [], procedures: [], timestamps: []
+          setClinicalData({
+            vital_signs: rec.clinical_data?.vital_signs || [],
+            medications: rec.clinical_data?.medications || [],
+            symptoms: rec.clinical_data?.symptoms || [],
+            procedures: rec.clinical_data?.procedures || [],
+            examinations: rec.clinical_data?.examinations || [],
+            timestamps: rec.clinical_data?.timestamps || []
           });
           setWarnings(rec.validation_warnings || []);
         }
@@ -276,6 +282,95 @@ export function ClinicalReviewPage({ recordId, onBack, onNavigateTimeline }) {
           )}
         </div>
       </div>
+
+      {/* Transparent Overall Report Quality & Confidence Assessment */}
+      {record.report_confidence && (
+        <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-5 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-3">
+            <div className="flex items-center gap-2.5">
+              <ShieldCheck className="w-5 h-5 text-clinical-teal-600 shrink-0" />
+              <div>
+                <h2 className="text-sm font-bold text-slate-900">
+                  Transparent Report Quality & Confidence Assessment
+                </h2>
+                <p className="text-xs text-slate-500">
+                  Deterministic evaluation based on acoustic probabilities, formulary precision, unsupported claims, and critical alerts.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <span
+                className={`text-xs font-bold px-3 py-1 rounded-full uppercase tracking-wider ${
+                  record.report_confidence.quality_level === "HIGH"
+                    ? "bg-emerald-100 text-emerald-800 border border-emerald-300"
+                    : record.report_confidence.quality_level === "MEDIUM"
+                    ? "bg-amber-100 text-amber-800 border border-amber-300"
+                    : record.report_confidence.quality_level === "LOW"
+                    ? "bg-rose-100 text-rose-800 border border-rose-300"
+                    : "bg-slate-100 text-slate-700 border border-slate-300"
+                }`}
+              >
+                {record.report_confidence.quality_level} QUALITY
+              </span>
+              {record.report_confidence.score_percent !== null && (
+                <span className="text-xs font-bold font-mono text-slate-800 bg-slate-100 px-2.5 py-1 rounded-lg border border-slate-200">
+                  {record.report_confidence.score_percent}%
+                </span>
+              )}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+            <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 flex items-center justify-between">
+              <div>
+                <span className="font-semibold text-slate-700 block">Speech Model Acoustic Clarity</span>
+                <span className="text-[11px] text-slate-500">Faster-Whisper beam probability decoding</span>
+              </div>
+              <span className="font-bold text-clinical-teal-800 font-mono text-xs uppercase px-2 py-0.5 rounded bg-white border border-slate-200">
+                {record.report_confidence.speech_confidence_level}
+              </span>
+            </div>
+
+            <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 flex items-center justify-between">
+              <div>
+                <span className="font-semibold text-slate-700 block">Practitioner Sign-Off Status</span>
+                <span className="text-[11px] text-slate-500">Supervisory clinician approval & oversight</span>
+              </div>
+              <span
+                className={`font-bold font-mono text-xs uppercase px-2 py-0.5 rounded ${
+                  record.report_confidence.clinical_signoff_status === "APPROVED"
+                    ? "bg-emerald-100 text-emerald-800"
+                    : "bg-amber-100 text-amber-800"
+                }`}
+              >
+                {record.report_confidence.clinical_signoff_status}
+              </span>
+            </div>
+          </div>
+
+          {/* Distinction Note */}
+          <div className="p-3 bg-blue-50/70 border border-blue-200 rounded-lg text-xs text-blue-900 flex items-start gap-2">
+            <HelpIcon className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
+            <div className="space-y-0.5">
+              <span className="font-bold">Crucial Distinction: </span>
+              <span>{record.report_confidence.distinction_note}</span>
+            </div>
+          </div>
+
+          {/* Reasons / Quality Notes */}
+          {record.report_confidence.reasons && record.report_confidence.reasons.length > 0 && (
+            <div className="text-[11px] text-slate-600 space-y-1 pt-1">
+              <span className="font-semibold text-slate-700">Quality Deductions & Safety Notices:</span>
+              <ul className="list-disc list-inside space-y-0.5 text-slate-600 pl-1">
+                {record.report_confidence.reasons.map((r, i) => (
+                  <li key={i}>{r}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Review Tab Sub-navigation */}
       <div className="flex border-b border-slate-200 bg-white rounded-xl p-1.5 shadow-sm gap-2 text-xs font-bold">
@@ -662,6 +757,45 @@ export function ClinicalReviewPage({ recordId, onBack, onNavigateTimeline }) {
                     >
                       <span>{p.procedure}</span>
                     </span>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Clinical Examinations & Physical Findings */}
+            <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-5 space-y-3">
+              <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+                <h3 className="text-sm font-bold text-slate-900">
+                  Clinical Examinations & Observations
+                </h3>
+                <span className="text-xs text-slate-400">Cardiovascular, Neurological, Respiratory</span>
+              </div>
+
+              {(!clinicalData.examinations || clinicalData.examinations.length === 0) ? (
+                <p className="text-xs text-slate-400 italic py-2">No physical examination findings extracted.</p>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {clinicalData.examinations.map((ex) => (
+                    <div key={ex.id} className="p-3 bg-slate-50 rounded-lg border border-slate-200 space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-bold text-slate-800">{ex.finding || ex.system}</span>
+                        <button
+                          onClick={() => toggleItemVerification("examinations", ex.id)}
+                          disabled={record.status === "Approved"}
+                          title="Click to toggle verification"
+                        >
+                          <VerificationBadge state={ex.verification_state || "Extracted"} />
+                        </button>
+                      </div>
+                      <div className="text-sm font-semibold text-clinical-teal-800">
+                        {ex.value || "Normal"} <span className="text-[11px] font-normal text-slate-500">({ex.system})</span>
+                      </div>
+                      {ex.source_phrase && (
+                        <div className="text-[11px] text-slate-400 italic truncate">
+                          "{ex.source_phrase}"
+                        </div>
+                      )}
+                    </div>
                   ))}
                 </div>
               )}

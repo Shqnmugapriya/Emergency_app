@@ -1,5 +1,8 @@
 import React, { useState, useRef, useEffect } from "react";
-import { Mic, Square, Play, Pause, RotateCcw, Upload, Volume2, AlertTriangle, Clock, Sparkles } from "lucide-react";
+import {
+  Mic, Square, Play, Pause, RotateCcw, Upload, Volume2, AlertTriangle,
+  Clock, Sparkles, Check, HelpCircle, Edit3, ShieldAlert, Tag, ChevronDown, ChevronUp
+} from "lucide-react";
 import { api } from "../services/api";
 
 export function AudioRecorder({ onTranscriptionComplete, onSaveDraft }) {
@@ -16,6 +19,11 @@ export function AudioRecorder({ onTranscriptionComplete, onSaveDraft }) {
   const [transcriptionMeta, setTranscriptionMeta] = useState(null);
   const [selectedFile, setSelectedFile] = useState(null);
   const [transcribeElapsed, setTranscribeElapsed] = useState(0);
+
+  // Word token inspector state
+  const [showWordInspector, setShowWordInspector] = useState(true);
+  const [selectedWordIndex, setSelectedWordIndex] = useState(null);
+  const [wordReplacementInput, setWordReplacementInput] = useState("");
 
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
@@ -474,13 +482,229 @@ export function AudioRecorder({ onTranscriptionComplete, onSaveDraft }) {
           </div>
 
           <textarea
-            rows={5}
+            rows={4}
             value={editableTranscript}
             onChange={(e) => setEditableTranscript(e.target.value)}
             placeholder="Whisper transcript will appear here automatically. You can also type or correct transcripts manually before extracting structured clinical data..."
-            className="w-full p-3.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-clinical-teal-500 focus:border-clinical-teal-500 text-sm text-slate-800 placeholder-slate-400 bg-white shadow-inner resize-y"
+            className="w-full p-3.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-clinical-teal-500 focus:border-clinical-teal-500 text-sm text-slate-800 placeholder-slate-400 bg-white shadow-inner resize-y font-mono text-sm leading-relaxed"
           />
         </div>
+
+        {/* Word-Level Token Stream & Confidence Inspector */}
+        {transcriptionMeta?.words && transcriptionMeta.words.length > 0 && (
+          <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
+            <div className="flex items-center justify-between border-b border-slate-200/80 pb-2.5">
+              <div className="flex items-center gap-2">
+                <Tag className="w-4 h-4 text-clinical-teal-700" />
+                <span className="text-xs font-bold text-slate-800 uppercase tracking-wider">
+                  Word Tokens & Acoustic Probability Stream ({transcriptionMeta.words.length} tokens)
+                </span>
+              </div>
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2 text-[10px] text-slate-500">
+                  <span className="flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block"></span> High (≥80%)
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-full bg-amber-500 inline-block"></span> Uncertain (&lt;80%)
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-full bg-slate-400 inline-block"></span> Unaligned / Typed
+                  </span>
+                </div>
+                <button
+                  onClick={() => setShowWordInspector(!showWordInspector)}
+                  className="text-xs text-slate-600 hover:text-slate-900 p-1"
+                  title="Toggle Word Token Viewer"
+                >
+                  {showWordInspector ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
+
+            {showWordInspector && (
+              <>
+                <p className="text-[11px] text-slate-500">
+                  Click any word token below to inspect acoustic probability (Faster-Whisper beam score), timing offset, catalogue verification, or make an in-place correction.
+                </p>
+
+                {/* Token Stream Chips */}
+                <div className="flex flex-wrap gap-1.5 p-3 bg-white rounded-lg border border-slate-200 max-h-48 overflow-y-auto">
+                  {transcriptionMeta.words.map((w, idx) => {
+                    const prob = w.probability;
+                    const isSelected = selectedWordIndex === idx;
+                    const isMedical = w.medical_match && w.medical_match.status !== "NONE";
+                    const isAmbiguous = w.medical_match && w.medical_match.requires_confirmation;
+
+                    let bgStyle = "bg-slate-100 text-slate-800 border-slate-200 hover:bg-slate-200";
+                    if (prob !== null && prob !== undefined) {
+                      if (prob >= 0.8) {
+                        bgStyle = "bg-emerald-50 text-emerald-900 border-emerald-200 hover:bg-emerald-100";
+                      } else {
+                        bgStyle = "bg-amber-50 text-amber-900 border-amber-300 hover:bg-amber-100 font-medium";
+                      }
+                    }
+
+                    if (isAmbiguous) {
+                      bgStyle = "bg-rose-50 text-rose-900 border-rose-300 hover:bg-rose-100 animate-pulse";
+                    }
+
+                    return (
+                      <button
+                        key={idx}
+                        type="button"
+                        onClick={() => {
+                          setSelectedWordIndex(idx);
+                          setWordReplacementInput(w.clean_text || w.word);
+                        }}
+                        className={`text-xs px-2 py-1 rounded border inline-flex items-center gap-1 transition-all ${bgStyle} ${
+                          isSelected ? "ring-2 ring-clinical-teal-600 font-bold shadow-sm" : ""
+                        }`}
+                        title={`Click to inspect word "${w.word}"`}
+                      >
+                        <span>{w.word}</span>
+                        {isMedical && (
+                          <span className="text-[9px] px-1 py-0.2 rounded bg-clinical-teal-600 text-white font-mono">
+                            Rx
+                          </span>
+                        )}
+                        {isAmbiguous && (
+                          <ShieldAlert className="w-3 h-3 text-rose-600" />
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Active Token Inspector Drawer */}
+                {selectedWordIndex !== null && transcriptionMeta.words[selectedWordIndex] && (
+                  <div className="p-3.5 bg-clinical-teal-50/90 rounded-lg border border-clinical-teal-200 space-y-3 text-xs">
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-clinical-teal-200/80 pb-2">
+                      <div className="flex items-center gap-2">
+                        <span className="font-bold text-slate-900 text-sm">
+                          Token #{selectedWordIndex + 1}: "{transcriptionMeta.words[selectedWordIndex].word}"
+                        </span>
+                        <span className="text-slate-500 font-mono text-[11px]">
+                          [{transcriptionMeta.words[selectedWordIndex].start}s – {transcriptionMeta.words[selectedWordIndex].end}s]
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-slate-600">Acoustic Confidence:</span>
+                        {transcriptionMeta.words[selectedWordIndex].probability !== null &&
+                        transcriptionMeta.words[selectedWordIndex].probability !== undefined ? (
+                          <span
+                            className={`font-mono font-bold px-2 py-0.5 rounded text-[11px] ${
+                              transcriptionMeta.words[selectedWordIndex].probability >= 0.8
+                                ? "bg-emerald-100 text-emerald-800"
+                                : "bg-amber-100 text-amber-800"
+                            }`}
+                          >
+                            {(transcriptionMeta.words[selectedWordIndex].probability * 100).toFixed(1)}% (Beam probability)
+                          </span>
+                        ) : (
+                          <span className="bg-slate-200 text-slate-700 font-mono px-2 py-0.5 rounded text-[11px]">
+                            Not available (Unaligned / Typed)
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Medical Catalogue Matching Info */}
+                    {transcriptionMeta.words[selectedWordIndex].medical_match &&
+                    transcriptionMeta.words[selectedWordIndex].medical_match.status !== "NONE" ? (
+                      <div className="p-2.5 bg-white rounded border border-clinical-teal-200 space-y-1">
+                        <div className="flex items-center justify-between">
+                          <span className="font-semibold text-clinical-teal-900 flex items-center gap-1.5">
+                            <Tag className="w-3.5 h-3.5 text-clinical-teal-600" />
+                            Catalogue Match: {transcriptionMeta.words[selectedWordIndex].medical_match.matched_entity}
+                          </span>
+                          <span className="text-[10px] uppercase font-bold px-1.5 py-0.5 rounded bg-slate-100 text-slate-700">
+                            {transcriptionMeta.words[selectedWordIndex].medical_match.status}
+                          </span>
+                        </div>
+                        {transcriptionMeta.words[selectedWordIndex].medical_match.requires_confirmation && (
+                          <div className="mt-1 p-2 bg-amber-50 rounded border border-amber-200 text-amber-900 flex items-center justify-between gap-2">
+                            <span>
+                              <strong>Ambiguity Warning:</strong> This term may refer to multiple drug formulations. Human clinician confirmation required.
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const updatedWords = [...transcriptionMeta.words];
+                                updatedWords[selectedWordIndex].medical_match.requires_confirmation = false;
+                                updatedWords[selectedWordIndex].medical_match.confirmed = true;
+                                setTranscriptionMeta((prev) => ({ ...prev, words: updatedWords }));
+                              }}
+                              className="px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded font-semibold text-[11px] shrink-0"
+                            >
+                              Confirm Match
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="text-[11px] text-slate-500 italic">
+                        Standard narrative token (no critical formulary match).
+                      </div>
+                    )}
+
+                    {/* Quick In-Place Word Correction */}
+                    <div className="flex items-center gap-2 pt-1">
+                      <input
+                        type="text"
+                        value={wordReplacementInput}
+                        onChange={(e) => setWordReplacementInput(e.target.value)}
+                        placeholder="Type word correction..."
+                        className="flex-1 p-2 bg-white rounded border border-slate-300 text-xs focus:ring-2 focus:ring-clinical-teal-500 font-mono"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!wordReplacementInput.trim()) return;
+                          const updatedWords = [...transcriptionMeta.words];
+                          updatedWords[selectedWordIndex] = {
+                            ...updatedWords[selectedWordIndex],
+                            word: wordReplacementInput.trim(),
+                            clean_text: wordReplacementInput.trim().toLowerCase(),
+                            probability: null, // manual correction no longer has acoustic probability
+                            confidence_category: "NOT_AVAILABLE"
+                          };
+                          setTranscriptionMeta((prev) => ({ ...prev, words: updatedWords }));
+
+                          // Rebuild editable transcript
+                          const updatedText = updatedWords.map((w) => w.word).join(" ");
+                          setEditableTranscript(updatedText);
+                          setSelectedWordIndex(null);
+                        }}
+                        className="px-3 py-2 bg-clinical-teal-700 hover:bg-clinical-teal-800 text-white rounded font-semibold text-xs flex items-center gap-1 shadow-sm"
+                      >
+                        <Edit3 className="w-3.5 h-3.5" />
+                        <span>Apply Word Correction</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedWordIndex(null)}
+                        className="px-2.5 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded text-xs"
+                      >
+                        Close
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
+        {/* If no audio tokens present (e.g. manually typed) */}
+        {(!transcriptionMeta?.words || transcriptionMeta.words.length === 0) && editableTranscript.trim() && (
+          <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-[11px] text-slate-500 flex items-center gap-2">
+            <HelpCircle className="w-4 h-4 text-slate-400 shrink-0" />
+            <span>
+              Transcript entered manually. Speech confidence probabilities are marked <strong>Not available</strong> for unaligned / typed notes.
+            </span>
+          </div>
+        )}
 
         {/* Original Machine Transcript Diff / Display */}
         {machineTranscript && machineTranscript !== editableTranscript && (

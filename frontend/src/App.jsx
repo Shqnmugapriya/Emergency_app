@@ -85,10 +85,6 @@ export default function App() {
           />
         )}
 
-        {activeTab === "accuracy" && (
-          <AccuracyTrustPage />
-        )}
-
         {activeTab === "settings" && <SettingsPage />}
       </main>
 

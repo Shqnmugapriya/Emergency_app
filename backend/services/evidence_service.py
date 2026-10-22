@@ -111,6 +111,26 @@ class EvidencePassportService:
             )
             evidence_items.append(item)
 
+        # 5. Process Physical Examinations / Clinical Observations
+        for ex in clinical_data.get("examinations", []):
+            item = cls._build_item_passport(
+                record_id=record_id,
+                field_id=ex.get("id"),
+                field_category="EXAMINATION",
+                field_name=ex.get("exam", "Examination"),
+                extracted_val=ex.get("finding", ""),
+                corrected_val=None,
+                source_phrase=ex.get("source_phrase"),
+                char_start=ex.get("char_start"),
+                char_end=ex.get("char_end"),
+                current_state=ex.get("verification_state", "Extracted"),
+                transcript_text=transcript_text,
+                segments=segments,
+                reviewer_decisions=decisions,
+                extra_notes=f"System: {ex.get('system', 'General')}"
+            )
+            evidence_items.append(item)
+
         unsupported = sum(1 for e in evidence_items if not e.get("has_supporting_evidence"))
         return {
             "entries": evidence_items,

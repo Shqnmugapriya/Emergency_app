@@ -73,13 +73,6 @@ export function Dashboard({ onNavigate, onSelectRecord }) {
             <FileText className="w-4 h-4" />
             <span>Browse Records</span>
           </button>
-          <button
-            onClick={() => onNavigate("accuracy")}
-            className="flex items-center gap-2 px-4 py-3 rounded-xl bg-clinical-navy-800 hover:bg-clinical-navy-700 text-slate-200 font-semibold text-sm border border-slate-700"
-          >
-            <BarChart3 className="w-4 h-4" />
-            <span>Trust & Accuracy</span>
-          </button>
         </div>
       </div>
 

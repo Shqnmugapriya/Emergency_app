@@ -199,7 +199,8 @@ def test_record_lifecycle_flow(client):
     })
     assert amend_res.status_code == 200
     amended_rec = amend_res.get_json()["data"]
-    assert amended_rec["status"] == "Amended"
+    assert amended_rec["status"] in ["Needs Review", "Amended"]
+    assert amended_rec["approved_at"] is None
     assert amended_rec["version"] == 2
 
     # 7. Check Audit Trail

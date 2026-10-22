@@ -819,7 +819,9 @@ def get_record_version_snapshot(record_id, version_num):
         if not row:
             return None
         res = dict(row)
-        res["snapshot_json"] = json.loads(res["snapshot_json"])
+        parsed_snap = json.loads(res["snapshot_json"])
+        res["snapshot_json"] = parsed_snap
+        res["snapshot_data"] = parsed_snap
         return res
     finally:
         conn.close()

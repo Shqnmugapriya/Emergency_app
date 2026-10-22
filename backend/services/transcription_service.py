@@ -168,7 +168,7 @@ class TranscriptionService:
 
         start_time = time.time()
 
-        # Run faster-whisper inference
+        # Run faster-whisper inference with word_timestamps enabled
         # temperature=0.0 prevents hallucination
         # beam_size=5 ensures high quality search
         # condition_on_previous_text=False prevents cascading errors on short notes
@@ -182,22 +182,109 @@ class TranscriptionService:
             condition_on_previous_text=False,
             initial_prompt=prompt,
             vad_filter=vad_filter,
-            vad_parameters=dict(min_silence_duration_ms=400)
+            vad_parameters=dict(min_silence_duration_ms=400),
+            word_timestamps=True
         )
+
+        from backend.services.medicine_service import MedicineService
 
         segments = []
         transcript_parts = []
+        all_words = []
+
         for seg in segments_generator:
             text = seg.text.strip()
             if text:
                 transcript_parts.append(text)
+                seg_words = []
+                stop_words = {"patient", "has", "had", "and", "the", "with", "from", "over", "into", "after", "before", "gives", "given", "about"}
+                for w in (getattr(seg, "words", None) or []):
+                    clean_token = w.word.strip().strip(".,;:?!")
+                    prob = round(float(w.probability), 3) if w.probability is not None else None
+                    start_sec = round(float(w.start), 2) if w.start is not None else None
+                    end_sec = round(float(w.end), 2) if w.end is not None else None
+
+                    # Technically defensible uncertainty category
+                    if prob is None:
+                        conf_cat = "NOT_AVAILABLE"
+                        conf_label = "Not available"
+                    elif prob >= 0.80:
+                        conf_cat = "HIGH"
+                        conf_label = "High confidence"
+                    elif prob >= 0.50:
+                        conf_cat = "UNCERTAIN"
+                        conf_label = "Uncertain"
+                    else:
+                        conf_cat = "LOW"
+                        conf_label = "Low confidence"
+
+                    # Medical term verification against catalogue
+                    is_med = False
+                    med_cat = None
+                    med_status = None
+                    med_canonical = None
+                    candidates = []
+                    req_verification = False
+                    term_explanation = None
+
+                    if clean_token and len(clean_token) > 2 and clean_token.lower() not in stop_words:
+                        med_match = MedicineService.match_medicine(clean_token)
+                        if med_match.get("status") in ("EXACT", "ALIAS"):
+                            is_med = True
+                            med_cat = "Medication"
+                            med_status = med_match["status"]
+                            med_canonical = med_match.get("matched_canonical")
+                            term_explanation = f"Verified catalogue match: {med_canonical}"
+                        elif med_match.get("status") == "AMBIGUOUS" and med_match.get("confidence_score", 0) >= 70:
+                            is_med = True
+                            med_cat = "Medication"
+                            med_status = "AMBIGUOUS"
+                            candidates = med_match.get("candidates", [])
+                            req_verification = True
+                            term_explanation = f"Ambiguous drug term. Human verification required among {len(candidates)} candidates."
+                        elif clean_token.lower() in ("bp", "pulse", "spo2", "gcs", "glucose", "temp", "mmhg", "bpm", "mg", "mcg", "ml", "iv", "im", "oral", "orally"):
+                            is_med = True
+                            med_cat = "Measurement / Vital"
+                            med_status = "MEASUREMENT"
+                            term_explanation = "Clinical unit or vital sign parameter"
+                        elif clean_token.lower() in ("fever", "pain", "dyspnea", "wheezing", "chest", "cough", "trauma", "chills", "nausea"):
+                            is_med = True
+                            med_cat = "Symptom"
+                            med_status = "SYMPTOM"
+                            term_explanation = "Clinical symptom observation"
+
+                    word_obj = {
+                        "word": w.word,
+                        "clean_text": clean_token,
+                        "start": start_sec,
+                        "end": end_sec,
+                        "probability": prob,
+                        "confidence_category": conf_cat,
+                        "confidence_label": conf_label,
+                        "is_medical_term": is_med,
+                        "medical_category": med_cat,
+                        "medical_status": med_status,
+                        "canonical_name": med_canonical,
+                        "candidates": candidates,
+                        "requires_verification": req_verification or (is_med and conf_cat in ("UNCERTAIN", "LOW")),
+                        "term_explanation": term_explanation,
+                        "medical_match": {
+                            "status": "EXACT_MATCH" if med_status == "EXACT" else "ALIAS_MATCH" if med_status == "ALIAS" else "AMBIGUOUS" if med_status == "AMBIGUOUS" else med_status or "NONE",
+                            "matched_entity": med_canonical or (clean_token if is_med else None),
+                            "requires_confirmation": req_verification or (is_med and conf_cat in ("UNCERTAIN", "LOW"))
+                        }
+                    }
+                    seg_words.append(word_obj)
+                    all_words.append(word_obj)
+
                 segments.append({
                     "id": seg.id,
                     "start": round(seg.start, 2),
                     "end": round(seg.end, 2),
                     "text": text,
                     "avg_logprob": round(seg.avg_logprob, 3),
-                    "no_speech_prob": round(seg.no_speech_prob, 3)
+                    "no_speech_prob": round(seg.no_speech_prob, 3),
+                    "words": seg_words
                 })
 
         full_transcript = " ".join(transcript_parts).strip()
@@ -214,6 +301,16 @@ class TranscriptionService:
             "duration": round(duration, 2),
             "inference_duration": round(elapsed, 2),
             "segments": segments,
+            "words": all_words,
+            "confidence_metadata": {
+                "calculation_method": "faster-whisper acoustic token softmax probability over vocabulary during beam search decoding",
+                "meaning": "Reflects speech recognition acoustic certainty of the recognized token. Does NOT indicate clinical correctness or pharmacological appropriateness.",
+                "word_count": len(all_words),
+                "high_confidence_words": sum(1 for w in all_words if w.get("confidence_category") == "HIGH"),
+                "uncertain_words": sum(1 for w in all_words if w.get("confidence_category") == "UNCERTAIN"),
+                "low_confidence_words": sum(1 for w in all_words if w.get("confidence_category") == "LOW"),
+                "medical_terms_count": sum(1 for w in all_words if w.get("is_medical_term"))
+            },
             "model_used": self.model_name,
             "device": self.device
         }

@@ -35,7 +35,6 @@ export function Navbar({ activeTab, setActiveTab }) {
     { id: "voice", label: "New Record", icon: Mic },
     { id: "records", label: "Clinical Records", icon: FileText },
     { id: "patients", label: "Patients", icon: Users },
-    { id: "accuracy", label: "Accuracy & Trust", icon: BarChart3 },
     { id: "settings", label: "System Status", icon: Settings },
   ];
 
