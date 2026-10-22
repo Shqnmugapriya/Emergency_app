@@ -19,6 +19,9 @@ from backend.routes.transcription_routes import transcription_bp
 from backend.routes.record_routes import record_bp
 from backend.routes.clinical_routes import clinical_bp
 from backend.routes.audio_routes import audio_bp
+from backend.routes.patient_routes import patient_bp
+from backend.routes.trust_routes import trust_bp
+from backend.routes.accuracy_routes import accuracy_bp
 
 def create_app(test_config=None):
     app = Flask(__name__)
@@ -56,6 +59,9 @@ def create_app(test_config=None):
     app.register_blueprint(record_bp)
     app.register_blueprint(clinical_bp)
     app.register_blueprint(audio_bp)
+    app.register_blueprint(patient_bp)
+    app.register_blueprint(trust_bp)
+    app.register_blueprint(accuracy_bp)
 
     # Consistent JSON error handlers
     @app.errorhandler(400)

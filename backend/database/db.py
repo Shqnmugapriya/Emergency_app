@@ -92,9 +92,208 @@ def init_db():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_records_created ON records(created_at);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_record_id ON audit_logs(record_id);")
 
+    # Safe additive schema migration for records table
+    cursor.execute("PRAGMA table_info(records);")
+    existing_cols = {row["name"] for row in cursor.fetchall()}
+    additive_cols = [
+        ("patient_id", "TEXT"),
+        ("event_at", "TEXT"),
+        ("exported_at", "TEXT"),
+        ("evidence_passport", "TEXT DEFAULT '[]'"),
+        ("uncertainty_ledger", "TEXT DEFAULT '[]'"),
+        ("change_impact_radar", "TEXT DEFAULT '{}'")
+    ]
+    for col_name, col_type in additive_cols:
+        if col_name not in existing_cols:
+            cursor.execute(f"ALTER TABLE records ADD COLUMN {col_name} {col_type};")
+
+    # Additive Table: Patients (Patient Continuity Engine)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS patients (
+            id TEXT PRIMARY KEY,
+            patient_id_display TEXT UNIQUE NOT NULL,
+            full_name TEXT NOT NULL,
+            dob TEXT NOT NULL,
+            gender TEXT NOT NULL,
+            phone TEXT DEFAULT '',
+            blood_type TEXT DEFAULT 'Unknown',
+            allergies TEXT DEFAULT '[]',
+            medical_history TEXT DEFAULT '[]',
+            emergency_contact TEXT DEFAULT '{}',
+            notes TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+    """)
+
+    # Additive Table: Patient Encounters
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS patient_encounters (
+            id TEXT PRIMARY KEY,
+            patient_id TEXT NOT NULL,
+            record_id TEXT NOT NULL,
+            encounter_type TEXT NOT NULL DEFAULT 'NEW_ENCOUNTER',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (patient_id) REFERENCES patients (id) ON DELETE CASCADE,
+            FOREIGN KEY (record_id) REFERENCES records (id) ON DELETE CASCADE
+        );
+    """)
+
+    # Additive Table: Evidence Passports
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS evidence_passports (
+            id TEXT PRIMARY KEY,
+            record_id TEXT NOT NULL,
+            field_id TEXT NOT NULL,
+            field_category TEXT NOT NULL,
+            field_name TEXT NOT NULL,
+            source_type TEXT NOT NULL,
+            source_location TEXT,
+            char_start INTEGER,
+            char_end INTEGER,
+            audio_timestamp_start REAL,
+            audio_timestamp_end REAL,
+            extracted_value TEXT,
+            corrected_value TEXT,
+            verification_status TEXT NOT NULL,
+            reviewer_decision TEXT,
+            decision_timestamp TEXT,
+            reviewer_id TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (record_id) REFERENCES records (id) ON DELETE CASCADE
+        );
+    """)
+
+    # Additive Table: Record Version History
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS record_versions (
+            id TEXT PRIMARY KEY,
+            record_id TEXT NOT NULL,
+            version_number INTEGER NOT NULL,
+            snapshot_json TEXT NOT NULL,
+            approved_at TEXT,
+            approved_by TEXT,
+            amendment_reason TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (record_id) REFERENCES records (id) ON DELETE CASCADE
+        );
+    """)
+
+    # Additive Table: Accuracy Evaluation Logs
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS accuracy_eval_logs (
+            id TEXT PRIMARY KEY,
+            test_suite_name TEXT NOT NULL,
+            model_version TEXT NOT NULL,
+            exact_match_accuracy REAL,
+            wer_score REAL,
+            precision_score REAL,
+            recall_score REAL,
+            f1_score REAL,
+            sample_count INTEGER,
+            details_json TEXT DEFAULT '{}',
+            evaluated_at TEXT NOT NULL
+        );
+    """)
+
+    # Additive Indexes
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_patients_name ON patients(full_name);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_patients_dob ON patients(dob);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_encounters_patient_id ON patient_encounters(patient_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_encounters_record_id ON patient_encounters(record_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_evidence_record_id ON evidence_passports(record_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_versions_record_id ON record_versions(record_id);")
+
     conn.commit()
     seed_medicine_catalogue(conn)
+    seed_patients(conn)
     conn.close()
+
+def seed_patients(conn):
+    """Seed synthetic pre-hospital patients for Patient Continuity Engine."""
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM patients;")
+    if cursor.fetchone()[0] > 0:
+        return
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    synthetic_patients = [
+        {
+            "id": "PAT-1001",
+            "patient_id_display": "MED-PAT-001",
+            "full_name": "Sarah Connor",
+            "dob": "1984-05-12",
+            "gender": "Female",
+            "phone": "+1-555-0192",
+            "blood_type": "O+",
+            "allergies": ["Penicillin", "Sulfa drugs"],
+            "medical_history": ["Asthma", "Mild Hypertension"],
+            "emergency_contact": {"name": "John Connor", "relation": "Son", "phone": "+1-555-0193"},
+            "notes": "Known allergy to penicillin; severe bronchial spasms documented in 2023."
+        },
+        {
+            "id": "PAT-1002",
+            "patient_id_display": "MED-PAT-002",
+            "full_name": "John Doe",
+            "dob": "1975-11-23",
+            "gender": "Male",
+            "phone": "+1-555-0144",
+            "blood_type": "A+",
+            "allergies": ["Aspirin"],
+            "medical_history": ["Coronary Artery Disease", "Type 2 Diabetes"],
+            "emergency_contact": {"name": "Jane Doe", "relation": "Spouse", "phone": "+1-555-0145"},
+            "notes": "Cardiac stent placed in 2021; takes daily anticoagulants."
+        },
+        {
+            "id": "PAT-1003",
+            "patient_id_display": "MED-PAT-003",
+            "full_name": "Priya Sharma",
+            "dob": "1992-08-30",
+            "gender": "Female",
+            "phone": "+1-555-0188",
+            "blood_type": "B+",
+            "allergies": ["Latex"],
+            "medical_history": ["None documented"],
+            "emergency_contact": {"name": "Raj Sharma", "relation": "Brother", "phone": "+1-555-0189"},
+            "notes": "No chronic conditions."
+        },
+        {
+            "id": "PAT-1004",
+            "patient_id_display": "MED-PAT-004",
+            "full_name": "John Doe",
+            "dob": "1999-03-15",
+            "gender": "Male",
+            "phone": "+1-555-0177",
+            "blood_type": "AB-",
+            "allergies": [],
+            "medical_history": ["Childhood epilepsy (resolved)"],
+            "emergency_contact": {"name": "Mary Doe", "relation": "Mother", "phone": "+1-555-0178"},
+            "notes": "Fictional duplicate name test case with different DOB/phone."
+        }
+    ]
+
+    for p in synthetic_patients:
+        cursor.execute("""
+            INSERT OR REPLACE INTO patients (
+                id, patient_id_display, full_name, dob, gender, phone, blood_type,
+                allergies, medical_history, emergency_contact, notes, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """, (
+            p["id"],
+            p["patient_id_display"],
+            p["full_name"],
+            p["dob"],
+            p["gender"],
+            p["phone"],
+            p["blood_type"],
+            json.dumps(p["allergies"]),
+            json.dumps(p["medical_history"]),
+            json.dumps(p["emergency_contact"]),
+            p["notes"],
+            now_iso,
+            now_iso
+        ))
+    conn.commit()
 
 def seed_medicine_catalogue(conn):
     """Seed verified local medicine catalogue with provenance."""
@@ -313,36 +512,44 @@ def get_record(record_id):
         if not row:
             return None
         rec = dict(row)
-        rec["transcription_metadata"] = json.loads(rec["transcription_metadata"] or "{}")
-        rec["clinical_data"] = json.loads(rec["clinical_data"] or "{}")
-        rec["validation_warnings"] = json.loads(rec["validation_warnings"] or "[]")
-        rec["review_decisions"] = json.loads(rec["review_decisions"] or "{}")
-        rec["patient_summary"] = json.loads(rec["patient_summary"] or "{}")
+        rec["transcription_metadata"] = json.loads(rec.get("transcription_metadata") or "{}")
+        rec["clinical_data"] = json.loads(rec.get("clinical_data") or "{}")
+        rec["validation_warnings"] = json.loads(rec.get("validation_warnings") or "[]")
+        rec["review_decisions"] = json.loads(rec.get("review_decisions") or "{}")
+        rec["patient_summary"] = json.loads(rec.get("patient_summary") or "{}")
+        rec["evidence_passport"] = json.loads(rec.get("evidence_passport") or "[]")
+        rec["uncertainty_ledger"] = json.loads(rec.get("uncertainty_ledger") or "[]")
+        rec["change_impact_radar"] = json.loads(rec.get("change_impact_radar") or "{}")
         return rec
     finally:
         conn.close()
 
-def list_records(limit=100, offset=0, status_filter=None):
-    """List records with summary information."""
+def list_records(limit=100, offset=0, status_filter=None, patient_id=None):
+    """List records with summary information and optional status/patient filter."""
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
+        query_parts = []
+        params = []
         if status_filter:
-            cursor.execute("""
-                SELECT id, call_number, responder_id, status, created_at, updated_at,
-                       audio_duration_seconds, machine_transcript, corrected_transcript,
-                       patient_summary, version
-                FROM records WHERE status = ?
-                ORDER BY created_at DESC LIMIT ? OFFSET ?;
-            """, (status_filter, limit, offset))
-        else:
-            cursor.execute("""
-                SELECT id, call_number, responder_id, status, created_at, updated_at,
-                       audio_duration_seconds, machine_transcript, corrected_transcript,
-                       patient_summary, version
-                FROM records
-                ORDER BY created_at DESC LIMIT ? OFFSET ?;
-            """, (limit, offset))
+            query_parts.append("status = ?")
+            params.append(status_filter)
+        if patient_id:
+            query_parts.append("patient_id = ?")
+            params.append(patient_id)
+
+        where_clause = f"WHERE {' AND '.join(query_parts)}" if query_parts else ""
+        query = f"""
+            SELECT id, call_number, responder_id, status, created_at, updated_at,
+                   patient_id, event_at, exported_at,
+                   audio_duration_seconds, machine_transcript, corrected_transcript,
+                   patient_summary, version
+            FROM records
+            {where_clause}
+            ORDER BY created_at DESC LIMIT ? OFFSET ?;
+        """
+        params.extend([limit, offset])
+        cursor.execute(query, tuple(params))
         rows = cursor.fetchall()
         result = []
         for r in rows:
@@ -371,5 +578,296 @@ def get_record_audit_logs(record_id):
             d["details"] = json.loads(d["details"] or "{}")
             result.append(d)
         return result
+    finally:
+        conn.close()
+
+# ==========================================================
+# Patient Continuity Engine Database Helpers
+# ==========================================================
+def get_patient(patient_id):
+    """Retrieve full patient profile by UUID or display ID."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM patients WHERE id = ? OR patient_id_display = ?;", (patient_id, patient_id))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        p = dict(row)
+        p["allergies"] = json.loads(p["allergies"] or "[]")
+        p["medical_history"] = json.loads(p["medical_history"] or "[]")
+        p["emergency_contact"] = json.loads(p["emergency_contact"] or "{}")
+        return p
+    finally:
+        conn.close()
+
+def list_patients(limit=100, offset=0, search_term=None):
+    """List patients with optional search filter."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        if search_term:
+            term = f"%{search_term.strip()}%"
+            cursor.execute("""
+                SELECT * FROM patients
+                WHERE full_name LIKE ? OR patient_id_display LIKE ? OR phone LIKE ? OR dob LIKE ?
+                ORDER BY full_name ASC LIMIT ? OFFSET ?;
+            """, (term, term, term, term, limit, offset))
+        else:
+            cursor.execute("SELECT * FROM patients ORDER BY full_name ASC LIMIT ? OFFSET ?;", (limit, offset))
+        rows = cursor.fetchall()
+        results = []
+        for r in rows:
+            p = dict(r)
+            p["allergies"] = json.loads(p["allergies"] or "[]")
+            p["medical_history"] = json.loads(p["medical_history"] or "[]")
+            p["emergency_contact"] = json.loads(p["emergency_contact"] or "{}")
+            results.append(p)
+        return results
+    finally:
+        conn.close()
+
+def search_patients_multifield(name=None, dob=None, phone=None, patient_id_display=None):
+    """
+    Search patients using multi-field matching.
+    Crucial Rule: NEVER identify a patient by name alone.
+    Flags 'ambiguous' if multiple patients match name without DOB/phone confirmation.
+    """
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        # Direct ID match
+        if patient_id_display:
+            cursor.execute("SELECT * FROM patients WHERE patient_id_display = ? OR id = ?;", (patient_id_display, patient_id_display))
+            rows = cursor.fetchall()
+            return [_parse_patient_row(r) for r in rows], False
+
+        # Multi-factor queries
+        conditions = []
+        params = []
+        if name:
+            conditions.append("LOWER(full_name) = LOWER(?)")
+            params.append(name.strip())
+        if dob:
+            conditions.append("dob = ?")
+            params.append(dob.strip())
+        if phone:
+            conditions.append("phone = ?")
+            params.append(phone.strip())
+
+        if not conditions:
+            return [], False
+
+        query = f"SELECT * FROM patients WHERE {' AND '.join(conditions)};"
+        cursor.execute(query, tuple(params))
+        exact_matches = [_parse_patient_row(r) for r in cursor.fetchall()]
+
+        # Check for ambiguity: if name given without DOB and multiple patients share the name
+        is_ambiguous = False
+        if name and not dob and len(exact_matches) > 1:
+            is_ambiguous = True
+
+        return exact_matches, is_ambiguous
+    finally:
+        conn.close()
+
+def _parse_patient_row(row):
+    p = dict(row)
+    p["allergies"] = json.loads(p["allergies"] or "[]")
+    p["medical_history"] = json.loads(p["medical_history"] or "[]")
+    p["emergency_contact"] = json.loads(p["emergency_contact"] or "{}")
+    return p
+
+def create_patient(data):
+    """Create a new persistent patient profile."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        patient_id = f"PAT-{uuid.uuid4().hex[:8].upper()}"
+        display_id = data.get("patient_id_display") or f"MED-PAT-{str(uuid.uuid4().int)[:5]}"
+
+        cursor.execute("""
+            INSERT INTO patients (
+                id, patient_id_display, full_name, dob, gender, phone, blood_type,
+                allergies, medical_history, emergency_contact, notes, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """, (
+            patient_id,
+            display_id,
+            data.get("full_name", "").strip(),
+            data.get("dob", "").strip(),
+            data.get("gender", "Unspecified"),
+            data.get("phone", ""),
+            data.get("blood_type", "Unknown"),
+            json.dumps(data.get("allergies", [])),
+            json.dumps(data.get("medical_history", [])),
+            json.dumps(data.get("emergency_contact", {})),
+            data.get("notes", ""),
+            now_iso,
+            now_iso
+        ))
+        conn.commit()
+        return get_patient(patient_id)
+    finally:
+        conn.close()
+
+def link_encounter(patient_id, record_id, encounter_type="NEW_ENCOUNTER"):
+    """Link an encounter record to a patient history."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        enc_id = f"ENC-{uuid.uuid4().hex[:8].upper()}"
+        cursor.execute("""
+            INSERT OR REPLACE INTO patient_encounters (id, patient_id, record_id, encounter_type, created_at)
+            VALUES (?, ?, ?, ?, ?);
+        """, (enc_id, patient_id, record_id, encounter_type, now_iso))
+
+        # Also update patient_id on the record table
+        cursor.execute("UPDATE records SET patient_id = ? WHERE id = ?;", (patient_id, record_id))
+        conn.commit()
+        return enc_id
+    finally:
+        conn.close()
+
+def get_patient_encounters(patient_id):
+    """Retrieve full chronological encounter history for a patient."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT pe.id as encounter_link_id, pe.encounter_type, pe.created_at as linked_at,
+                   r.*
+            FROM patient_encounters pe
+            JOIN records r ON pe.record_id = r.id
+            WHERE pe.patient_id = ?
+            ORDER BY r.created_at DESC;
+        """, (patient_id,))
+        rows = cursor.fetchall()
+        encounters = []
+        for r in rows:
+            d = dict(r)
+            d["transcription_metadata"] = json.loads(d.get("transcription_metadata") or "{}")
+            d["clinical_data"] = json.loads(d.get("clinical_data") or "{}")
+            d["validation_warnings"] = json.loads(d.get("validation_warnings") or "[]")
+            d["review_decisions"] = json.loads(d.get("review_decisions") or "{}")
+            d["patient_summary"] = json.loads(d.get("patient_summary") or "{}")
+            encounters.append(d)
+        return encounters
+    finally:
+        conn.close()
+
+# ==========================================================
+# Version History Snapshot Database Helpers
+# ==========================================================
+def save_record_version_snapshot(record_id, version_num, snapshot_dict, approved_by="Supervisor", amendment_reason=None):
+    """Save an immutable snapshot of an approved or amended record version."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        v_id = f"VER-{record_id}-v{version_num}"
+        now_iso = datetime.now(timezone.utc).isoformat()
+        cursor.execute("""
+            INSERT OR REPLACE INTO record_versions (
+                id, record_id, version_number, snapshot_json, approved_at,
+                approved_by, amendment_reason, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+        """, (
+            v_id,
+            record_id,
+            version_num,
+            json.dumps(snapshot_dict),
+            now_iso if not amendment_reason else snapshot_dict.get("approved_at"),
+            approved_by,
+            amendment_reason,
+            now_iso
+        ))
+        conn.commit()
+        return v_id
+    finally:
+        conn.close()
+
+def get_record_versions(record_id):
+    """Retrieve list of all preserved historical versions for a record."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, record_id, version_number, approved_at, approved_by, amendment_reason, created_at
+            FROM record_versions
+            WHERE record_id = ?
+            ORDER BY version_number ASC;
+        """, (record_id,))
+        rows = cursor.fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+def get_record_version_snapshot(record_id, version_num):
+    """Retrieve full snapshot payload for a specific version."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT * FROM record_versions
+            WHERE record_id = ? AND version_number = ?;
+        """, (record_id, version_num))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        res = dict(row)
+        res["snapshot_json"] = json.loads(res["snapshot_json"])
+        return res
+    finally:
+        conn.close()
+
+# ==========================================================
+# Accuracy Evaluation Logging Helpers
+# ==========================================================
+def save_accuracy_eval_log(eval_data):
+    """Record an internal evaluation run."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        log_id = f"EVAL-{uuid.uuid4().hex[:8].upper()}"
+        now_iso = datetime.now(timezone.utc).isoformat()
+        cursor.execute("""
+            INSERT INTO accuracy_eval_logs (
+                id, test_suite_name, model_version, exact_match_accuracy,
+                wer_score, precision_score, recall_score, f1_score,
+                sample_count, details_json, evaluated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """, (
+            log_id,
+            eval_data.get("test_suite_name", "Clinical Benchmark v1"),
+            eval_data.get("model_version", "faster-whisper-base"),
+            eval_data.get("exact_match_accuracy", 0.0),
+            eval_data.get("wer_score", 0.0),
+            eval_data.get("precision_score", 0.0),
+            eval_data.get("recall_score", 0.0),
+            eval_data.get("f1_score", 0.0),
+            eval_data.get("sample_count", 0),
+            json.dumps(eval_data.get("details", {})),
+            now_iso
+        ))
+        conn.commit()
+        return log_id
+    finally:
+        conn.close()
+
+def get_latest_accuracy_eval_logs(limit=20):
+    """Fetch latest internal benchmark evaluation runs."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM accuracy_eval_logs ORDER BY evaluated_at DESC LIMIT ?;", (limit,))
+        rows = cursor.fetchall()
+        results = []
+        for r in rows:
+            d = dict(r)
+            d["details_json"] = json.loads(d["details_json"] or "{}")
+            results.append(d)
+        return results
     finally:
         conn.close()

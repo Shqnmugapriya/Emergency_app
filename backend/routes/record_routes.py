@@ -10,11 +10,15 @@ import uuid
 from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify, send_file
 from backend.database.db import (
-    get_db_connection, get_record, list_records, log_audit_event, get_record_audit_logs
+    get_db_connection, get_record, list_records, log_audit_event, get_record_audit_logs,
+    link_encounter, save_record_version_snapshot, get_record_versions, get_record_version_snapshot,
+    get_patient
 )
 from backend.services.clinical_extractor import ClinicalExtractor
 from backend.services.validation_service import ValidationService, ValidationSeverity
 from backend.services.report_service import ReportService
+from backend.services.evidence_service import EvidencePassportService
+from backend.services.uncertainty_service import UncertaintyService
 
 record_bp = Blueprint("records", __name__)
 
@@ -26,6 +30,8 @@ def create_record():
     record_id = f"REC-{datetime.now(timezone.utc).strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
     call_number = body.get("call_number", f"EMS-{uuid.uuid4().hex[:5].upper()}")
     responder_id = body.get("responder_id", "Paramedic-101")
+    patient_id = body.get("patient_id")
+    event_at = body.get("event_at")
     now_iso = datetime.now(timezone.utc).isoformat()
 
     machine_transcript = body.get("machine_transcript", "").strip()
@@ -46,6 +52,20 @@ def create_record():
     # Validate clinical entities
     validation_warnings = ValidationService.validate_clinical_record(clinical_data)
 
+    # Compile Evidence Passport and Uncertainty Ledger
+    evidence_passport = EvidencePassportService.compile_evidence_passport(
+        record_id=record_id,
+        clinical_data=clinical_data,
+        transcript_text=corrected_transcript,
+        transcription_meta=transcription_meta,
+        reviewer_decisions=body.get("review_decisions", {})
+    )
+
+    uncertainty_ledger = UncertaintyService.compile_uncertainty_ledger(
+        clinical_data=clinical_data,
+        warnings=validation_warnings
+    )
+
     initial_status = "Needs Review" if (clinical_data.get("vital_signs") or clinical_data.get("medications")) else "Draft"
 
     conn = get_db_connection()
@@ -57,8 +77,9 @@ def create_record():
                 recording_time, transcription_time, audio_filename, audio_mimetype,
                 audio_duration_seconds, machine_transcript, corrected_transcript,
                 transcription_metadata, clinical_data, validation_warnings,
-                review_decisions, patient_summary, version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1);
+                review_decisions, patient_summary, version, patient_id, event_at,
+                evidence_passport, uncertainty_ledger, change_impact_radar
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?);
         """, (
             record_id,
             call_number,
@@ -77,9 +98,18 @@ def create_record():
             json.dumps(clinical_data),
             json.dumps(validation_warnings),
             json.dumps(body.get("review_decisions", {})),
-            json.dumps(patient_summary)
+            json.dumps(patient_summary),
+            patient_id,
+            event_at,
+            json.dumps(evidence_passport),
+            json.dumps(uncertainty_ledger),
+            json.dumps({})
         ))
         conn.commit()
+
+        # Link to patient if provided
+        if patient_id:
+            link_encounter(patient_id, record_id, body.get("encounter_type", "NEW_ENCOUNTER"))
 
         log_audit_event(
             record_id=record_id,
@@ -88,8 +118,10 @@ def create_record():
             details={
                 "call_number": call_number,
                 "status": initial_status,
+                "patient_id": patient_id,
                 "has_audio": bool(audio_filename),
-                "warnings_count": len(validation_warnings)
+                "warnings_count": len(validation_warnings),
+                "evidence_passport_items": len(evidence_passport)
             }
         )
 
@@ -176,6 +208,27 @@ def update_record(record_id):
         if w["id"] in resolved_ids:
             w["resolved"] = True
 
+    # Change Impact Radar: analyze ripple effects of edits
+    change_impact = UncertaintyService.analyze_change_impact(
+        old_record=rec,
+        new_clinical_data=clinical_data,
+        new_transcript=corrected_transcript
+    )
+
+    # Recompile Evidence Passport & Uncertainty Ledger
+    evidence_passport = EvidencePassportService.compile_evidence_passport(
+        record_id=record_id,
+        clinical_data=clinical_data,
+        transcript_text=corrected_transcript,
+        transcription_meta=rec.get("transcription_metadata", {}),
+        reviewer_decisions=review_decisions
+    )
+
+    uncertainty_ledger = UncertaintyService.compile_uncertainty_ledger(
+        clinical_data=clinical_data,
+        warnings=validation_warnings
+    )
+
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
@@ -189,7 +242,10 @@ def update_record(record_id):
                 clinical_data = ?,
                 validation_warnings = ?,
                 review_decisions = ?,
-                patient_summary = ?
+                patient_summary = ?,
+                evidence_passport = ?,
+                uncertainty_ledger = ?,
+                change_impact_radar = ?
             WHERE id = ?;
         """, (
             call_number,
@@ -201,6 +257,9 @@ def update_record(record_id):
             json.dumps(validation_warnings),
             json.dumps(review_decisions),
             json.dumps(patient_summary),
+            json.dumps(evidence_passport),
+            json.dumps(uncertainty_ledger),
+            json.dumps(change_impact),
             record_id
         ))
         conn.commit()
@@ -212,14 +271,16 @@ def update_record(record_id):
             details={
                 "new_status": status,
                 "transcript_length": len(corrected_transcript),
-                "warnings_count": len(validation_warnings)
+                "warnings_count": len(validation_warnings),
+                "impact_items_count": change_impact.get("impact_count", 0)
             }
         )
 
         updated = get_record(record_id)
         return jsonify({
             "success": True,
-            "data": updated
+            "data": updated,
+            "change_impact": change_impact
         }), 200
 
     except Exception as e:
@@ -235,6 +296,7 @@ def approve_record(record_id):
     """
     Approve record. Requires human verification.
     Blocks if critical unresolved validation warnings exist.
+    Snapshots approved version in record_versions.
     """
     rec = get_record(record_id)
     if not rec:
@@ -283,6 +345,16 @@ def approve_record(record_id):
         )
 
         approved_record = get_record(record_id)
+
+        # Snapshot version 1 (or current version) into record_versions table
+        save_record_version_snapshot(
+            record_id=record_id,
+            version_num=approved_record.get("version", 1),
+            snapshot_dict=approved_record,
+            approved_by=actor,
+            amendment_reason=None
+        )
+
         return jsonify({
             "success": True,
             "message": "Record successfully approved and finalized.",
@@ -295,6 +367,7 @@ def approve_record(record_id):
 def amend_record(record_id):
     """
     Amend an approved record. Requires amendment reason and logs traceability.
+    Snapshots amended version in record_versions.
     """
     rec = get_record(record_id)
     if not rec:
@@ -316,6 +389,19 @@ def amend_record(record_id):
     clinical_data = body.get("clinical_data", rec["clinical_data"])
     validation_warnings = ValidationService.validate_clinical_record(clinical_data)
 
+    evidence_passport = EvidencePassportService.compile_evidence_passport(
+        record_id=record_id,
+        clinical_data=clinical_data,
+        transcript_text=corrected_transcript,
+        transcription_meta=rec.get("transcription_metadata", {}),
+        reviewer_decisions={"amendment_reason": amendment_reason}
+    )
+
+    uncertainty_ledger = UncertaintyService.compile_uncertainty_ledger(
+        clinical_data=clinical_data,
+        warnings=validation_warnings
+    )
+
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
@@ -326,7 +412,9 @@ def amend_record(record_id):
                 updated_at = ?,
                 corrected_transcript = ?,
                 clinical_data = ?,
-                validation_warnings = ?
+                validation_warnings = ?,
+                evidence_passport = ?,
+                uncertainty_ledger = ?
             WHERE id = ?;
         """, (
             new_version,
@@ -334,6 +422,8 @@ def amend_record(record_id):
             corrected_transcript,
             json.dumps(clinical_data),
             json.dumps(validation_warnings),
+            json.dumps(evidence_passport),
+            json.dumps(uncertainty_ledger),
             record_id
         ))
         conn.commit()
@@ -350,6 +440,16 @@ def amend_record(record_id):
         )
 
         amended = get_record(record_id)
+
+        # Snapshot newly amended version
+        save_record_version_snapshot(
+            record_id=record_id,
+            version_num=new_version,
+            snapshot_dict=amended,
+            approved_by=actor,
+            amendment_reason=amendment_reason
+        )
+
         return jsonify({
             "success": True,
             "message": f"Record amended to version {new_version}.",
@@ -357,6 +457,39 @@ def amend_record(record_id):
         }), 200
     finally:
         conn.close()
+
+@record_bp.route("/api/records/<record_id>/versions", methods=["GET"])
+def get_record_version_list(record_id):
+    """Retrieve list of preserved versions for a record."""
+    rec = get_record(record_id)
+    if not rec:
+        return jsonify({"success": False, "error": "Record not found."}), 404
+    versions = get_record_versions(record_id)
+    return jsonify({
+        "success": True,
+        "record_id": record_id,
+        "count": len(versions),
+        "data": versions
+    }), 200
+
+@record_bp.route("/api/records/<record_id>/versions/<int:version_num>", methods=["GET"])
+def get_version_snapshot(record_id, version_num):
+    """Retrieve exact snapshot of a historical approved or amended version."""
+    snapshot = get_record_version_snapshot(record_id, version_num)
+    if not snapshot:
+        return jsonify({"success": False, "error": f"Version {version_num} for record '{record_id}' not found."}), 404
+    return jsonify({
+        "success": True,
+        "data": snapshot
+    }), 200
+
+@record_bp.route("/api/records/<record_id>/export/fhir", methods=["GET"])
+def export_fhir(record_id):
+    """Export standards-compatible HL7 FHIR R4 Document Bundle."""
+    bundle = ReportService.generate_fhir_bundle(record_id)
+    if not bundle:
+        return jsonify({"success": False, "error": "Record not found."}), 404
+    return jsonify(bundle), 200
 
 @record_bp.route("/api/records/<record_id>/export/json", methods=["GET"])
 def export_json(record_id):

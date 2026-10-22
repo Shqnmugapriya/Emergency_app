@@ -88,24 +88,124 @@ class ReportService:
 
     @classmethod
     def generate_json_report(cls, record_id):
-        """Build full structured JSON export."""
+        """
+        Build full structured JSON export.
+        Strictly excludes internal evaluation accuracy metrics from patient reports.
+        """
         record = get_record(record_id)
         if not record:
             return None
 
         audit_logs = get_record_audit_logs(record_id)
 
+        # Enforce strict separation: sanitize patient report payload
+        clean_record = dict(record)
+        clean_record.pop("accuracy_metrics", None)
+        clean_record.pop("aggregate_scores", None)
+        clean_record.pop("model_eval_summary", None)
+
         report_payload = {
             "export_metadata": {
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "system": "Field-to-Record EMS Documentation Assistant",
-                "system_version": "1.0.0",
+                "system_version": "1.2.0",
+                "schema": "PreHospitalCareReport-v1",
                 "notice": "Documentation assistant record. Not a diagnostic or treatment recommendation system."
             },
-            "record": record,
+            "record": clean_record,
             "audit_trail": audit_logs
         }
         return report_payload
+
+    @classmethod
+    def generate_fhir_bundle(cls, record_id):
+        """
+        Export an isolated, standards-compatible HL7 FHIR R4 Document Bundle.
+        Completely non-disruptive to existing JSON and PDF exports.
+        """
+        record = get_record(record_id)
+        if not record:
+            return None
+
+        clinical = record.get("clinical_data", {})
+        patient_summary = record.get("patient_summary", {})
+        patient_id = record.get("patient_id") or "PAT-ANONYMOUS"
+
+        bundle = {
+            "resourceType": "Bundle",
+            "id": f"fhir-{record_id}",
+            "type": "document",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "entry": [
+                {
+                    "fullUrl": f"urn:uuid:composition-{record_id}",
+                    "resource": {
+                        "resourceType": "Composition",
+                        "id": f"comp-{record_id}",
+                        "status": "final" if record.get("status") == "Approved" else "preliminary",
+                        "type": {
+                            "coding": [{
+                                "system": "http://loinc.org",
+                                "code": "67796-3",
+                                "display": "EMS Patient Care Report"
+                            }]
+                        },
+                        "subject": {"reference": f"urn:uuid:patient-{patient_id}"},
+                        "date": record.get("created_at"),
+                        "author": [{"display": record.get("responder_id", "First Responder")}],
+                        "title": f"Pre-Hospital Clinical Run {record.get('call_number', 'EMS')}",
+                        "section": [
+                            {
+                                "title": "Field Narrative",
+                                "text": {
+                                    "status": "generated",
+                                    "div": f"<div>{record.get('corrected_transcript') or record.get('machine_transcript')}</div>"
+                                }
+                            }
+                        ]
+                    }
+                },
+                {
+                    "fullUrl": f"urn:uuid:patient-{patient_id}",
+                    "resource": {
+                        "resourceType": "Patient",
+                        "id": patient_id,
+                        "gender": str(patient_summary.get("gender", "unknown")).lower()
+                    }
+                }
+            ]
+        }
+
+        # Add Vitals as FHIR Observations
+        for v in clinical.get("vital_signs", []):
+            bundle["entry"].append({
+                "fullUrl": f"urn:uuid:obs-{v.get('id')}",
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": v.get("id"),
+                    "status": "final",
+                    "code": {"text": v.get("name")},
+                    "valueString": f"{v.get('value')} {v.get('unit', '')}".strip()
+                }
+            })
+
+        # Add Medications as FHIR MedicationStatements
+        for m in clinical.get("medications", []):
+            bundle["entry"].append({
+                "fullUrl": f"urn:uuid:med-{m.get('id')}",
+                "resource": {
+                    "resourceType": "MedicationStatement",
+                    "id": m.get("id"),
+                    "status": "not-taken" if m.get("is_negated") else "active",
+                    "medicationCodeableConcept": {"text": m.get("canonical_name", m.get("raw_mention"))},
+                    "dosage": [{
+                        "text": f"{m.get('dosage') or ''} {m.get('unit') or ''}".strip(),
+                        "route": {"text": m.get("route") or "unspecified"}
+                    }]
+                }
+            })
+
+        return bundle
 
     @classmethod
     def generate_pdf_report(cls, record_id, output_filename=None):
