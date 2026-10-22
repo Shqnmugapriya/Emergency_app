@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Activity, Mic, FileText, Settings, ShieldCheck, AlertCircle } from "lucide-react";
+import { Activity, Mic, FileText, Settings, ShieldCheck, AlertCircle, Users, BarChart3 } from "lucide-react";
 import { api } from "../services/api";
 
 export function Navbar({ activeTab, setActiveTab }) {
@@ -34,6 +34,8 @@ export function Navbar({ activeTab, setActiveTab }) {
     { id: "dashboard", label: "Dashboard", icon: Activity },
     { id: "voice", label: "New Record", icon: Mic },
     { id: "records", label: "Clinical Records", icon: FileText },
+    { id: "patients", label: "Patients", icon: Users },
+    { id: "accuracy", label: "Accuracy & Trust", icon: BarChart3 },
     { id: "settings", label: "System Status", icon: Settings },
   ];
 

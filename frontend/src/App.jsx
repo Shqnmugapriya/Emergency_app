@@ -7,6 +7,8 @@ import { TimelinePage } from "./pages/TimelinePage";
 import { RecordsPage } from "./pages/RecordsPage";
 import { RecordDetailsPage } from "./pages/RecordDetailsPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { PatientsPage } from "./pages/PatientsPage";
+import { AccuracyTrustPage } from "./pages/AccuracyTrustPage";
 
 export default function App() {
   const [activeTab, setActiveTab] = useState("dashboard");
@@ -75,6 +77,16 @@ export default function App() {
             onNavigateReview={(id) => handleSelectRecord(id, "review")}
             onNavigateTimeline={(id) => handleSelectRecord(id, "timeline")}
           />
+        )}
+
+        {activeTab === "patients" && (
+          <PatientsPage
+            onSelectRecord={handleSelectRecord}
+          />
+        )}
+
+        {activeTab === "accuracy" && (
+          <AccuracyTrustPage />
         )}
 
         {activeTab === "settings" && <SettingsPage />}

@@ -646,8 +646,9 @@ def search_patients_multifield(name=None, dob=None, phone=None, patient_id_displ
         conditions = []
         params = []
         if name:
-            conditions.append("LOWER(full_name) = LOWER(?)")
-            params.append(name.strip())
+            clean_name = name.strip()
+            conditions.append("(LOWER(full_name) = LOWER(?) OR LOWER(full_name) LIKE LOWER(?))")
+            params.extend([clean_name, f"%{clean_name}%"])
         if dob:
             conditions.append("dob = ?")
             params.append(dob.strip())
@@ -685,7 +686,7 @@ def create_patient(data):
         cursor = conn.cursor()
         now_iso = datetime.now(timezone.utc).isoformat()
         patient_id = f"PAT-{uuid.uuid4().hex[:8].upper()}"
-        display_id = data.get("patient_id_display") or f"MED-PAT-{str(uuid.uuid4().int)[:5]}"
+        display_id = data.get("patient_id_display") or f"PT-{str(uuid.uuid4().int)[:5]}"
 
         cursor.execute("""
             INSERT INTO patients (
@@ -753,6 +754,7 @@ def get_patient_encounters(patient_id):
             d["validation_warnings"] = json.loads(d.get("validation_warnings") or "[]")
             d["review_decisions"] = json.loads(d.get("review_decisions") or "{}")
             d["patient_summary"] = json.loads(d.get("patient_summary") or "{}")
+            d["record_id"] = d.get("id")
             encounters.append(d)
         return encounters
     finally:

@@ -30,7 +30,13 @@ def list_or_search_patients():
         "is_ambiguous": result["is_ambiguous"],
         "requires_confirmation": result["requires_confirmation"],
         "message": result["message"],
-        "data": result["patients"]
+        "data": {
+            "patients": result["patients"],
+            "is_ambiguous": result["is_ambiguous"],
+            "requires_confirmation": result["requires_confirmation"],
+            "warning": result.get("message") if (result["is_ambiguous"] or result.get("requires_confirmation")) else None
+        },
+        "patients": result["patients"]
     }), 200
 
 @patient_bp.route("/api/patients/<patient_id>", methods=["GET"])

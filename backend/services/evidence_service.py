@@ -111,7 +111,12 @@ class EvidencePassportService:
             )
             evidence_items.append(item)
 
-        return evidence_items
+        unsupported = sum(1 for e in evidence_items if not e.get("has_supporting_evidence"))
+        return {
+            "entries": evidence_items,
+            "unsupported_claims_count": unsupported,
+            "total_count": len(evidence_items)
+        }
 
     @classmethod
     def _build_item_passport(cls, record_id, field_id, field_category, field_name,
@@ -156,9 +161,12 @@ class EvidencePassportService:
             "audio_timestamp_end": audio_end,
             "audio_interval_formatted": f"{audio_start}s - {audio_end}s" if audio_start is not None else "No audio timestamp alignment",
             "extracted_value": extracted_val,
+            "field_value": extracted_val,
             "corrected_value": corrected_val,
             "verification_status": v_status,
             "has_supporting_evidence": has_phrase,
+            "is_supported": has_phrase,
+            "supporting_phrase": source_phrase,
             "reviewer_decision": item_decision.get("decision", "Pending Review"),
             "decision_timestamp": item_decision.get("timestamp"),
             "reviewer_id": item_decision.get("reviewer_id", "Reviewer"),
@@ -171,10 +179,11 @@ class EvidencePassportService:
     @classmethod
     def persist_evidence_passport(cls, record_id, evidence_items):
         """Save evidence items to evidence_passports table."""
+        items = evidence_items.get("entries", []) if isinstance(evidence_items, dict) else (evidence_items or [])
         conn = get_db_connection()
         try:
             cursor = conn.cursor()
-            for ev in evidence_items:
+            for ev in items:
                 cursor.execute("""
                     INSERT OR REPLACE INTO evidence_passports (
                         id, record_id, field_id, field_category, field_name, source_type,

@@ -124,7 +124,17 @@ class UncertaintyService:
                 "requires_action": False
             })
 
-        return ledger
+        counts = {
+            "not_mentioned": sum(1 for item in ledger if item.get("uncertainty_type") == UncertaintyType.NOT_MENTIONED),
+            "unknown": sum(1 for item in ledger if item.get("uncertainty_type") == UncertaintyType.UNKNOWN),
+            "unclear": sum(1 for item in ledger if item.get("uncertainty_type") == UncertaintyType.UNCLEAR),
+            "conflicting": sum(1 for item in ledger if item.get("uncertainty_type") == UncertaintyType.CONFLICTING)
+        }
+        return {
+            "items": ledger,
+            "counts": counts,
+            "total_count": len(ledger)
+        }
 
     @classmethod
     def analyze_change_impact(cls, old_record, new_clinical_data, new_transcript):
@@ -203,6 +213,8 @@ class UncertaintyService:
             "impact_count": len(impact_items),
             "affected_sections": list(affected_sections),
             "impact_items": impact_items,
+            "changes_detected": [item["detail"] for item in impact_items],
+            "summary": f"{len(impact_items)} field(s) modified affecting {len(affected_sections)} section(s)." if impact_items else "No critical changes detected.",
             "recalculated_warnings_count": len(new_warnings),
             "recalculated_warnings": new_warnings,
             "evaluated_at": datetime.now(timezone.utc).isoformat()

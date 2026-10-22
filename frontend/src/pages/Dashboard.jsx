@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Mic, FileText, CheckCircle2, Clock, AlertTriangle, ArrowRight, ShieldCheck, Download } from "lucide-react";
+import { Mic, FileText, CheckCircle2, Clock, AlertTriangle, ArrowRight, ShieldCheck, Download, Users, BarChart3 } from "lucide-react";
 import { api } from "../services/api";
 import { StatusBadge } from "../components/StatusBadge";
 
@@ -60,11 +60,25 @@ export function Dashboard({ onNavigate, onSelectRecord }) {
             <span>New Voice Record</span>
           </button>
           <button
+            onClick={() => onNavigate("patients")}
+            className="flex items-center gap-2 px-4 py-3 rounded-xl bg-clinical-navy-800 hover:bg-clinical-navy-700 text-slate-200 font-semibold text-sm border border-slate-700"
+          >
+            <Users className="w-4 h-4" />
+            <span>Patients</span>
+          </button>
+          <button
             onClick={() => onNavigate("records")}
             className="flex items-center gap-2 px-4 py-3 rounded-xl bg-clinical-navy-800 hover:bg-clinical-navy-700 text-slate-200 font-semibold text-sm border border-slate-700"
           >
             <FileText className="w-4 h-4" />
-            <span>Browse All Records</span>
+            <span>Browse Records</span>
+          </button>
+          <button
+            onClick={() => onNavigate("accuracy")}
+            className="flex items-center gap-2 px-4 py-3 rounded-xl bg-clinical-navy-800 hover:bg-clinical-navy-700 text-slate-200 font-semibold text-sm border border-slate-700"
+          >
+            <BarChart3 className="w-4 h-4" />
+            <span>Trust & Accuracy</span>
           </button>
         </div>
       </div>

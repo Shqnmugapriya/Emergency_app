@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from "react";
 import {
   FileText, ArrowLeft, Download, ShieldCheck, Clock, User,
-  Volume2, AlertTriangle, Edit3, CheckCircle2, History
+  Volume2, AlertTriangle, Edit3, CheckCircle2, History,
+  Layers, ExternalLink, Calendar, Phone, Activity
 } from "lucide-react";
 import { api } from "../services/api";
 import { StatusBadge, VerificationBadge } from "../components/StatusBadge";
@@ -9,28 +10,52 @@ import { StatusBadge, VerificationBadge } from "../components/StatusBadge";
 export function RecordDetailsPage({ recordId, onBack, onNavigateReview, onNavigateTimeline }) {
   const [record, setRecord] = useState(null);
   const [auditLogs, setAuditLogs] = useState([]);
+  const [versions, setVersions] = useState([]);
+  const [patientInfo, setPatientInfo] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [showAmendModal, setShowAmendModal] = useState(false);
   const [amendReason, setAmendReason] = useState("");
   const [amendText, setAmendText] = useState("");
   const [isSubmittingAmend, setIsSubmittingAmend] = useState(false);
+  const [selectedVersionSnapshot, setSelectedVersionSnapshot] = useState(null);
 
   useEffect(() => {
     let isMounted = true;
     const loadDetails = async () => {
       try {
-        const [recRes, auditRes] = await Promise.all([
+        const [recRes, auditRes, verRes] = await Promise.all([
           api.getRecord(recordId),
-          api.getAuditTrail(recordId)
+          api.getAuditTrail(recordId),
+          api.getRecordVersions(recordId)
         ]);
+
         if (isMounted) {
           if (recRes.success && recRes.data) {
-            setRecord(recRes.data);
-            setAmendText(recRes.data.corrected_transcript || recRes.data.machine_transcript || "");
+            const r = recRes.data;
+            setRecord(r);
+            setAmendText(r.corrected_transcript || r.machine_transcript || "");
+
+            // If patient is linked, fetch patient details
+            const ptId = r.patient_id || r.patient_summary?.patient_id;
+            if (ptId) {
+              try {
+                const ptRes = await api.getPatient(ptId);
+                if (ptRes.success && ptRes.data) {
+                  setPatientInfo(ptRes.data);
+                }
+              } catch (e) {
+                // Ignore patient fetch error
+              }
+            }
           }
+
           if (auditRes.success && auditRes.data) {
             setAuditLogs(auditRes.data);
+          }
+
+          if (verRes.success && verRes.data) {
+            setVersions(verRes.data.versions || []);
           }
         }
       } catch (err) {
@@ -54,16 +79,21 @@ export function RecordDetailsPage({ recordId, onBack, onNavigateReview, onNaviga
       const res = await api.amendRecord(recordId, {
         reason: amendReason,
         corrected_transcript: amendText,
-        clinical_data: record.clinical_data // Can be further updated in review
+        clinical_data: record.clinical_data
       });
 
       if (res.success && res.data) {
         setRecord(res.data);
         setShowAmendModal(false);
         setAmendReason("");
-        // Reload audit trail
-        const auditRes = await api.getAuditTrail(recordId);
+
+        // Reload audit trail & versions
+        const [auditRes, verRes] = await Promise.all([
+          api.getAuditTrail(recordId),
+          api.getRecordVersions(recordId)
+        ]);
         if (auditRes.success) setAuditLogs(auditRes.data);
+        if (verRes.success) setVersions(verRes.data.versions || []);
       }
     } catch (err) {
       alert(err.message || "Failed to submit amendment.");
@@ -135,6 +165,20 @@ export function RecordDetailsPage({ recordId, onBack, onNavigateReview, onNaviga
               <span>Amend Record</span>
             </button>
           )}
+
+          {/* FHIR Export Button */}
+          <a
+            href={api.getFhirUrl(record.id)}
+            target="_blank"
+            rel="noreferrer"
+            className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold"
+            title="Download Standards-Compatible HL7 FHIR R4 Document Bundle"
+          >
+            <Download className="w-3.5 h-3.5" />
+            <span>FHIR R4</span>
+          </a>
+
+          {/* Official PDF Export */}
           <a
             href={api.getPdfUrl(record.id)}
             target="_blank"
@@ -147,7 +191,34 @@ export function RecordDetailsPage({ recordId, onBack, onNavigateReview, onNaviga
         </div>
       </div>
 
-      {/* Audio Playback Box (if recording preserved) */}
+      {/* Linked Patient Profile Card */}
+      {patientInfo && (
+        <div className="bg-clinical-teal-50/80 border border-clinical-teal-200 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-clinical-teal-600 text-white flex items-center justify-center font-bold">
+              <User className="w-4 h-4" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="font-bold text-slate-900 text-sm">{patientInfo.full_name}</span>
+                <span className="font-mono bg-white px-2 py-0.5 rounded text-clinical-teal-900 font-semibold border border-clinical-teal-200">
+                  {patientInfo.patient_id_display}
+                </span>
+              </div>
+              <p className="text-slate-600 mt-0.5">
+                DOB: <strong>{patientInfo.date_of_birth}</strong> • Blood: {patientInfo.blood_type || "Unknown"} • Phone: {patientInfo.phone || "N/A"}
+              </p>
+            </div>
+          </div>
+          {patientInfo.allergies && patientInfo.allergies.length > 0 && (
+            <div className="text-[11px] font-semibold text-rose-700 bg-rose-50 px-2.5 py-1 rounded border border-rose-200 shrink-0">
+              Known Allergies: {patientInfo.allergies.join(", ")}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Audio Playback Box */}
       {audioUrl && (
         <div className="bg-slate-900 text-white p-4 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-sm">
           <div className="flex items-center gap-3">
@@ -223,6 +294,38 @@ export function RecordDetailsPage({ recordId, onBack, onNavigateReview, onNaviga
           )}
         </div>
       </div>
+
+      {/* Immutable Version Snapshots */}
+      {versions.length > 0 && (
+        <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 space-y-4">
+          <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
+            <Layers className="w-4 h-4 text-clinical-teal-600" />
+            <span>Immutable Version History Snapshots ({versions.length})</span>
+          </h2>
+
+          <div className="space-y-2">
+            {versions.map((ver) => (
+              <div
+                key={ver.version_number}
+                className="p-3 bg-slate-50 rounded-lg border border-slate-200 text-xs flex flex-wrap items-center justify-between gap-3"
+              >
+                <div>
+                  <span className="font-bold text-slate-900">Version {ver.version_number}</span>
+                  <span className="text-slate-500 ml-2">
+                    Snapshotted at: {new Date(ver.snapshotted_at).toLocaleString()}
+                  </span>
+                  {ver.change_summary && (
+                    <p className="text-slate-600 text-[11px] mt-0.5 italic">{ver.change_summary}</p>
+                  )}
+                </div>
+                <span className="text-[10px] font-mono px-2 py-0.5 bg-purple-100 text-purple-800 rounded font-semibold">
+                  Immutable Snapshot
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Immutable Audit Trail Section */}
       <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 space-y-4">

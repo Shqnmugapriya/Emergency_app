@@ -145,5 +145,104 @@ export const api = {
   async getMedicineCatalogue() {
     const res = await fetch(`${API_BASE}/api/medicines/catalogue`);
     return handleResponse(res);
+  },
+
+  // Patient Continuity Engine
+  async listPatients(params = {}) {
+    const query = new URLSearchParams(params).toString();
+    const url = `${API_BASE}/api/patients${query ? `?${query}` : ""}`;
+    const res = await fetch(url);
+    return handleResponse(res);
+  },
+
+  async getPatient(patientId) {
+    const res = await fetch(`${API_BASE}/api/patients/${encodeURIComponent(patientId)}`);
+    return handleResponse(res);
+  },
+
+  async getPatientHistory(patientId) {
+    const res = await fetch(`${API_BASE}/api/patients/${encodeURIComponent(patientId)}/history`);
+    return handleResponse(res);
+  },
+
+  async registerPatient(patientData) {
+    const res = await fetch(`${API_BASE}/api/patients`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patientData)
+    });
+    return handleResponse(res);
+  },
+
+  async linkPatientEncounter(patientId, linkData) {
+    const res = await fetch(`${API_BASE}/api/patients/${encodeURIComponent(patientId)}/link`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(linkData)
+    });
+    return handleResponse(res);
+  },
+
+  // Version History Snapshots
+  async getRecordVersions(recordId) {
+    const res = await fetch(`${API_BASE}/api/records/${encodeURIComponent(recordId)}/versions`);
+    return handleResponse(res);
+  },
+
+  async getVersionSnapshot(recordId, versionNum) {
+    const res = await fetch(`${API_BASE}/api/records/${encodeURIComponent(recordId)}/versions/${versionNum}`);
+    return handleResponse(res);
+  },
+
+  // Offline Trust Monitor & Draft Recovery
+  async getTrustStatus() {
+    const res = await fetch(`${API_BASE}/api/trust/status`);
+    return handleResponse(res);
+  },
+
+  async autosaveDraft(sessionId, draft) {
+    const res = await fetch(`${API_BASE}/api/trust/drafts/save`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: sessionId, draft })
+    });
+    return handleResponse(res);
+  },
+
+  async getAutosavedDraft(sessionId) {
+    const res = await fetch(`${API_BASE}/api/trust/drafts/${encodeURIComponent(sessionId)}`);
+    return handleResponse(res);
+  },
+
+  async clearAutosavedDraft(sessionId) {
+    const res = await fetch(`${API_BASE}/api/trust/drafts/${encodeURIComponent(sessionId)}`, {
+      method: "DELETE"
+    });
+    return handleResponse(res);
+  },
+
+  // Clinical Accuracy Evaluation Dashboard
+  async getAccuracyMetrics() {
+    const res = await fetch(`${API_BASE}/api/accuracy/metrics`);
+    return handleResponse(res);
+  },
+
+  async triggerEvaluation(modelName = null) {
+    const res = await fetch(`${API_BASE}/api/accuracy/evaluate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model_name: modelName })
+    });
+    return handleResponse(res);
+  },
+
+  // Standards-Compatible Export (HL7 FHIR R4 Bundle)
+  getFhirUrl(recordId) {
+    return `${API_BASE}/api/records/${encodeURIComponent(recordId)}/export/fhir`;
+  },
+
+  async exportFhir(recordId) {
+    const res = await fetch(this.getFhirUrl(recordId));
+    return handleResponse(res);
   }
 };

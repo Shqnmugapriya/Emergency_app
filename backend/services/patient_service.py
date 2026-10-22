@@ -99,6 +99,18 @@ class PatientService:
     @classmethod
     def register_new_patient(cls, patient_data):
         """Create new persistent patient profile."""
+        full_name = patient_data.get("full_name")
+        if not full_name:
+            fn = patient_data.get("first_name", "").strip()
+            ln = patient_data.get("last_name", "").strip()
+            full_name = f"{fn} {ln}".strip()
+            if full_name:
+                patient_data["full_name"] = full_name
+
+        dob = patient_data.get("dob") or patient_data.get("date_of_birth")
+        if dob:
+            patient_data["dob"] = dob
+
         if not patient_data.get("full_name") or not patient_data.get("dob"):
             raise ValueError("Full name and Date of Birth (DOB) are mandatory to register a patient.")
 
