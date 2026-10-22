@@ -1,0 +1,401 @@
+"""
+Record Management Routes: Full lifecycle support for clinical field documentation records.
+Status flow: Draft -> Needs Review -> Reviewed -> Approved -> Amended.
+Audit logging on all lifecycle transitions.
+"""
+
+import os
+import json
+import uuid
+from datetime import datetime, timezone
+from flask import Blueprint, request, jsonify, send_file
+from backend.database.db import (
+    get_db_connection, get_record, list_records, log_audit_event, get_record_audit_logs
+)
+from backend.services.clinical_extractor import ClinicalExtractor
+from backend.services.validation_service import ValidationService, ValidationSeverity
+from backend.services.report_service import ReportService
+
+record_bp = Blueprint("records", __name__)
+
+@record_bp.route("/api/records", methods=["POST"])
+def create_record():
+    """Create a new clinical documentation record."""
+    body = request.get_json(silent=True) or {}
+
+    record_id = f"REC-{datetime.now(timezone.utc).strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+    call_number = body.get("call_number", f"EMS-{uuid.uuid4().hex[:5].upper()}")
+    responder_id = body.get("responder_id", "Paramedic-101")
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    machine_transcript = body.get("machine_transcript", "").strip()
+    corrected_transcript = body.get("corrected_transcript", machine_transcript).strip()
+    audio_filename = body.get("audio_filename", "")
+    audio_mimetype = body.get("audio_mimetype", "audio/webm")
+    audio_duration = float(body.get("audio_duration_seconds", 0.0))
+    transcription_meta = body.get("transcription_metadata", {})
+    patient_summary = body.get("patient_summary", {})
+
+    # If transcript is provided, extract clinical entities automatically
+    clinical_data = body.get("clinical_data")
+    if not clinical_data and corrected_transcript:
+        clinical_data = ClinicalExtractor.extract_all(corrected_transcript)
+    elif not clinical_data:
+        clinical_data = {"vital_signs": [], "medications": [], "symptoms": [], "procedures": [], "timestamps": []}
+
+    # Validate clinical entities
+    validation_warnings = ValidationService.validate_clinical_record(clinical_data)
+
+    initial_status = "Needs Review" if (clinical_data.get("vital_signs") or clinical_data.get("medications")) else "Draft"
+
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO records (
+                id, call_number, responder_id, status, created_at, updated_at,
+                recording_time, transcription_time, audio_filename, audio_mimetype,
+                audio_duration_seconds, machine_transcript, corrected_transcript,
+                transcription_metadata, clinical_data, validation_warnings,
+                review_decisions, patient_summary, version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1);
+        """, (
+            record_id,
+            call_number,
+            responder_id,
+            initial_status,
+            now_iso,
+            now_iso,
+            body.get("recording_time", now_iso),
+            body.get("transcription_time", now_iso if machine_transcript else None),
+            audio_filename,
+            audio_mimetype,
+            audio_duration,
+            machine_transcript,
+            corrected_transcript,
+            json.dumps(transcription_meta),
+            json.dumps(clinical_data),
+            json.dumps(validation_warnings),
+            json.dumps(body.get("review_decisions", {})),
+            json.dumps(patient_summary)
+        ))
+        conn.commit()
+
+        log_audit_event(
+            record_id=record_id,
+            action="CREATE",
+            actor=responder_id,
+            details={
+                "call_number": call_number,
+                "status": initial_status,
+                "has_audio": bool(audio_filename),
+                "warnings_count": len(validation_warnings)
+            }
+        )
+
+        created_record = get_record(record_id)
+        return jsonify({
+            "success": True,
+            "data": created_record
+        }), 201
+
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": f"Failed to create record: {str(e)}"
+        }), 500
+    finally:
+        conn.close()
+
+@record_bp.route("/api/records", methods=["GET"])
+def get_records_list():
+    """List all records with optional status filter."""
+    status_filter = request.args.get("status")
+    limit = int(request.args.get("limit", 100))
+    offset = int(request.args.get("offset", 0))
+
+    records = list_records(limit=limit, offset=offset, status_filter=status_filter)
+    return jsonify({
+        "success": True,
+        "count": len(records),
+        "data": records
+    }), 200
+
+@record_bp.route("/api/records/<record_id>", methods=["GET"])
+def get_single_record(record_id):
+    """Retrieve complete record details."""
+    rec = get_record(record_id)
+    if not rec:
+        return jsonify({
+            "success": False,
+            "error": f"Record '{record_id}' not found."
+        }), 404
+
+    audit_logs = get_record_audit_logs(record_id)
+    rec["audit_trail"] = audit_logs
+
+    return jsonify({
+        "success": True,
+        "data": rec
+    }), 200
+
+@record_bp.route("/api/records/<record_id>", methods=["PUT"])
+def update_record(record_id):
+    """Update record fields (transcript, clinical data, review decisions)."""
+    rec = get_record(record_id)
+    if not rec:
+        return jsonify({
+            "success": False,
+            "error": f"Record '{record_id}' not found."
+        }), 404
+
+    # Approved records cannot be edited directly via PUT; must use /amend
+    if rec["status"] == "Approved":
+        return jsonify({
+            "success": False,
+            "error": "Approved records are immutable. Use the /api/records/<id>/amend endpoint to submit a traceable amendment."
+        }), 409
+
+    body = request.get_json(silent=True) or {}
+    now_iso = datetime.now(timezone.utc).isoformat()
+    responder_id = body.get("responder_id", rec["responder_id"])
+
+    corrected_transcript = body.get("corrected_transcript", rec["corrected_transcript"])
+    clinical_data = body.get("clinical_data", rec["clinical_data"])
+    review_decisions = body.get("review_decisions", rec["review_decisions"])
+    patient_summary = body.get("patient_summary", rec["patient_summary"])
+    status = body.get("status", rec["status"])
+    call_number = body.get("call_number", rec["call_number"])
+
+    # Re-run validation rules
+    validation_warnings = ValidationService.validate_clinical_record(clinical_data)
+
+    # If any warnings were marked resolved in review_decisions, update their state
+    resolved_ids = set(review_decisions.get("resolved_warning_ids", []))
+    for w in validation_warnings:
+        if w["id"] in resolved_ids:
+            w["resolved"] = True
+
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE records SET
+                call_number = ?,
+                responder_id = ?,
+                status = ?,
+                updated_at = ?,
+                corrected_transcript = ?,
+                clinical_data = ?,
+                validation_warnings = ?,
+                review_decisions = ?,
+                patient_summary = ?
+            WHERE id = ?;
+        """, (
+            call_number,
+            responder_id,
+            status,
+            now_iso,
+            corrected_transcript,
+            json.dumps(clinical_data),
+            json.dumps(validation_warnings),
+            json.dumps(review_decisions),
+            json.dumps(patient_summary),
+            record_id
+        ))
+        conn.commit()
+
+        log_audit_event(
+            record_id=record_id,
+            action="UPDATE_RECORD",
+            actor=responder_id,
+            details={
+                "new_status": status,
+                "transcript_length": len(corrected_transcript),
+                "warnings_count": len(validation_warnings)
+            }
+        )
+
+        updated = get_record(record_id)
+        return jsonify({
+            "success": True,
+            "data": updated
+        }), 200
+
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": f"Failed to update record: {str(e)}"
+        }), 500
+    finally:
+        conn.close()
+
+@record_bp.route("/api/records/<record_id>/approve", methods=["POST"])
+def approve_record(record_id):
+    """
+    Approve record. Requires human verification.
+    Blocks if critical unresolved validation warnings exist.
+    """
+    rec = get_record(record_id)
+    if not rec:
+        return jsonify({"success": False, "error": "Record not found."}), 404
+
+    body = request.get_json(silent=True) or {}
+    actor = body.get("reviewer_id") or rec.get("responder_id") or "First Responder"
+    override_notes = body.get("override_notes", "")
+
+    warnings = rec.get("validation_warnings", [])
+    critical_unresolved = [
+        w for w in warnings
+        if w.get("severity") == ValidationSeverity.CRITICAL and not w.get("resolved")
+    ]
+
+    if critical_unresolved and not override_notes:
+        return jsonify({
+            "success": False,
+            "error": "Cannot approve record with unresolved CRITICAL warnings without explicit clinician override notes.",
+            "critical_warnings": critical_unresolved
+        }), 422
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE records SET
+                status = 'Approved',
+                updated_at = ?,
+                approved_at = ?,
+                reviewed_at = ?
+            WHERE id = ?;
+        """, (now_iso, now_iso, now_iso, record_id))
+        conn.commit()
+
+        log_audit_event(
+            record_id=record_id,
+            action="APPROVE",
+            actor=actor,
+            details={
+                "previous_status": rec["status"],
+                "approved_at": now_iso,
+                "override_notes": override_notes
+            }
+        )
+
+        approved_record = get_record(record_id)
+        return jsonify({
+            "success": True,
+            "message": "Record successfully approved and finalized.",
+            "data": approved_record
+        }), 200
+    finally:
+        conn.close()
+
+@record_bp.route("/api/records/<record_id>/amend", methods=["POST"])
+def amend_record(record_id):
+    """
+    Amend an approved record. Requires amendment reason and logs traceability.
+    """
+    rec = get_record(record_id)
+    if not rec:
+        return jsonify({"success": False, "error": "Record not found."}), 404
+
+    body = request.get_json(silent=True) or {}
+    amendment_reason = body.get("reason", "").strip()
+    if not amendment_reason:
+        return jsonify({
+            "success": False,
+            "error": "A clear amendment reason is mandatory to modify an approved record."
+        }), 400
+
+    actor = body.get("responder_id") or rec.get("responder_id")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    new_version = rec.get("version", 1) + 1
+
+    corrected_transcript = body.get("corrected_transcript", rec["corrected_transcript"])
+    clinical_data = body.get("clinical_data", rec["clinical_data"])
+    validation_warnings = ValidationService.validate_clinical_record(clinical_data)
+
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE records SET
+                status = 'Amended',
+                version = ?,
+                updated_at = ?,
+                corrected_transcript = ?,
+                clinical_data = ?,
+                validation_warnings = ?
+            WHERE id = ?;
+        """, (
+            new_version,
+            now_iso,
+            corrected_transcript,
+            json.dumps(clinical_data),
+            json.dumps(validation_warnings),
+            record_id
+        ))
+        conn.commit()
+
+        log_audit_event(
+            record_id=record_id,
+            action="AMEND",
+            actor=actor,
+            details={
+                "new_version": new_version,
+                "reason": amendment_reason,
+                "amended_at": now_iso
+            }
+        )
+
+        amended = get_record(record_id)
+        return jsonify({
+            "success": True,
+            "message": f"Record amended to version {new_version}.",
+            "data": amended
+        }), 200
+    finally:
+        conn.close()
+
+@record_bp.route("/api/records/<record_id>/export/json", methods=["GET"])
+def export_json(record_id):
+    """Export complete structured JSON report."""
+    report = ReportService.generate_json_report(record_id)
+    if not report:
+        return jsonify({"success": False, "error": "Record not found."}), 404
+    return jsonify(report), 200
+
+@record_bp.route("/api/records/<record_id>/export/pdf", methods=["GET"])
+def export_pdf(record_id):
+    """Generate and serve clinical PDF report."""
+    rec = get_record(record_id)
+    if not rec:
+        return jsonify({"success": False, "error": "Record not found."}), 404
+
+    pdf_path = ReportService.generate_pdf_report(record_id)
+    if not pdf_path or not os.path.exists(pdf_path):
+        return jsonify({"success": False, "error": "Failed to compile PDF report."}), 500
+
+    filename = f"field_to_record_{record_id}.pdf"
+    return send_file(
+        pdf_path,
+        mimetype="application/pdf",
+        as_attachment=True,
+        download_name=filename
+    )
+
+@record_bp.route("/api/records/<record_id>/audit", methods=["GET"])
+def get_audit_trail(record_id):
+    """Retrieve full audit log trail for a record."""
+    rec = get_record(record_id)
+    if not rec:
+        return jsonify({"success": False, "error": "Record not found."}), 404
+
+    logs = get_record_audit_logs(record_id)
+    return jsonify({
+        "success": True,
+        "record_id": record_id,
+        "count": len(logs),
+        "data": logs
+    }), 200

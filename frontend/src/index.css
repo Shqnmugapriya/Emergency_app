@@ -1,0 +1,20 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-slate-50 text-slate-900 font-sans antialiased min-h-screen selection:bg-teal-500 selection:text-white;
+  }
+}
+
+/* Custom pulse animations for recording */
+@keyframes recordPulse {
+  0% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.08); opacity: 0.85; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+.animate-record-pulse {
+  animation: recordPulse 1.8s infinite ease-in-out;
+}
