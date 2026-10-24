@@ -47,6 +47,56 @@ def compute_phonetic_code(word):
 
     return ("".join(code) + "0000")[:4]
 
+ROUTE_EQUIVALENCE = {
+    "oral": {"oral", "orally", "po", "p.o.", "p o", "by mouth", "per os", "swallowed"},
+    "chewable": {"chewable", "chewed", "oral", "orally", "po", "by mouth"},
+    "iv": {"iv", "i.v.", "i v", "intravenous", "intravenously", "iv push", "iv drip", "iv infusion", "via iv"},
+    "im": {"im", "i.m.", "i m", "intramuscular", "intramuscularly"},
+    "sublingual": {"sublingual", "sublingually", "sl", "s.l.", "s l", "under the tongue"},
+    "in": {"in", "i.n.", "i n", "intranasal", "intranasally", "nasal", "nasal spray"},
+    "intranasal": {"in", "i.n.", "i n", "intranasal", "intranasally", "nasal", "nasal spray"},
+    "inhaled": {"inhaled", "inhalation", "inhaler", "puff", "puffs", "nebulized", "nebulizer", "via nebulizer", "inhaled/nebulized"},
+    "nebulized": {"inhaled", "inhalation", "inhaler", "puff", "puffs", "nebulized", "nebulizer", "via nebulizer", "inhaled/nebulized"},
+    "inhaled/nebulized": {"inhaled", "inhalation", "inhaler", "puff", "puffs", "nebulized", "nebulizer", "via nebulizer", "inhaled/nebulized"},
+    "sc": {"sc", "s.c.", "s c", "sq", "s.q.", "s q", "sub-q", "subq", "subcutaneous", "subcutaneously"},
+    "io": {"io", "i.o.", "i o", "intraosseous", "intraosseously"},
+    "pr": {"pr", "p.r.", "p r", "per rectum", "rectal", "rectally"},
+    "transdermal": {"transdermal", "transdermally", "topical", "topically", "patch"},
+    "topical": {"topical", "topically", "transdermal", "transdermally", "patch"},
+    "buccal": {"buccal", "buccally"},
+    "odt": {"odt", "orally disintegrating", "oral"}
+}
+
+def check_route_match(extracted_route, standard_routes):
+    """
+    Check if an extracted route matches any standard catalogue routes,
+    supporting standard clinical phrases, synonyms, abbreviations, and adverb forms.
+    """
+    if not extracted_route or not standard_routes:
+        return False
+    norm_r = str(extracted_route).lower().strip().strip(".,;:?!'\"")
+    norm_r_nodots = re.sub(r"[.\s]+", " ", norm_r)
+    norm_r_clean = norm_r.replace(".", "").strip()
+    norm_standards = [s.lower().strip() for s in standard_routes]
+
+    # Direct equality or substring check (preserves existing behavior)
+    for sr in norm_standards:
+        if (norm_r == sr or norm_r in sr or sr in norm_r or 
+            norm_r_clean == sr or norm_r_clean in sr or sr in norm_r_clean):
+            return True
+
+    # Equivalence mapping check
+    for sr in norm_standards:
+        sr_equiv = ROUTE_EQUIVALENCE.get(sr, set())
+        if norm_r in sr_equiv or norm_r_nodots in sr_equiv or norm_r_clean in sr_equiv:
+            return True
+        for candidate in (norm_r, norm_r_nodots, norm_r_clean):
+            r_equiv = ROUTE_EQUIVALENCE.get(candidate, set())
+            if sr in r_equiv or (r_equiv and sr_equiv and r_equiv.intersection(sr_equiv)):
+                return True
+
+    return False
+
 class MedicineService:
     @classmethod
     def get_all_medicines(cls):
@@ -99,8 +149,7 @@ class MedicineService:
         route_match = None
         route_note = "Route not specified."
         if route:
-            norm_route = str(route).lower().strip()
-            route_match = any(norm_route in sr or sr in norm_route for sr in standard_routes)
+            route_match = check_route_match(route, med.get("standard_routes", []))
             if route_match:
                 route_note = f"Route '{route}' matches standard administration route."
             else:
@@ -137,7 +186,7 @@ class MedicineService:
                 "provenance": "None"
             }
 
-        q = query_text.strip().lower()
+        q = query_text.strip().strip(".,;:?!'\"").lower()
         q_phonetic = compute_phonetic_code(q)
         medicines = cls.get_all_medicines()
 

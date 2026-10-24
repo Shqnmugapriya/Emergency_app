@@ -271,19 +271,37 @@ class ClinicalExtractor:
                 # Check negation (e.g., "no paracetamol given", "did not administer morphine")
                 is_neg, neg_trigger = cls.check_negation(text, start)
 
-                # Search surrounding window (+- 60 chars) for dosage and route
-                window_start = max(0, start - 30)
-                window_end = min(len(text), end + 60)
+                # Search surrounding window (+- 60 chars) for dosage and route, respecting sentence/clause boundaries
+                prev_text = text[:start]
+                next_text = text[end:]
+                last_break = max(prev_text.rfind(". "), prev_text.rfind("; "), prev_text.rfind("\n"))
+                clause_start = 0 if last_break == -1 else last_break + 2
+                window_start = max(clause_start, start - 45)
+
+                next_breaks = [p for p in [next_text.find(". "), next_text.find("; "), next_text.find("\n")] if p != -1]
+                clause_end = len(text) if not next_breaks else end + min(next_breaks) + 1
+                window_end = min(clause_end, end + 60)
                 surrounding = text[window_start:window_end]
+
+                med_offset_s = start - window_start
+                med_offset_e = end - window_start
+
+                def span_dist(m_s, m_e):
+                    if m_e <= med_offset_s:
+                        return med_offset_s - m_e
+                    if m_s >= med_offset_e:
+                        return m_s - med_offset_e
+                    return 0
 
                 # Dosage regex
                 dose_pattern = r"(?i)\b([0-9]+(?:\.[0-9]+)?)\s*(mg|mcg|micrograms?|milligrams?|g|grams?|ml|milliliters?|puffs?|sprays?|tablets?|tabs?|l/min|units?)\b"
-                dose_match = re.search(dose_pattern, surrounding)
+                dose_matches = list(re.finditer(dose_pattern, surrounding))
                 dosage = None
                 dose_unit = None
-                if dose_match:
-                    dosage = dose_match.group(1)
-                    raw_u = dose_match.group(2).lower()
+                if dose_matches:
+                    best_dose = min(dose_matches, key=lambda dm: span_dist(dm.start(), dm.end()))
+                    dosage = best_dose.group(1)
+                    raw_u = best_dose.group(2).lower()
                     # Normalize unit
                     if "mcg" in raw_u or "micro" in raw_u:
                         dose_unit = "mcg"
@@ -302,31 +320,60 @@ class ClinicalExtractor:
                     else:
                         dose_unit = raw_u
 
-                # Route regex
-                route_pattern = r"(?i)\b(iv|intravenous|im|intramuscular|oral|orally|po|sublingual|sl|in|intranasal|nebulized|inhaled|io|intraosseous|topical|pr|per\s+rectum)\b"
-                route_match = re.search(route_pattern, surrounding)
+                # Route regex covering all clinical phrases, abbreviations, synonyms, and adverb forms
+                route_pattern = (
+                    r"(?i)\b("
+                    r"iv|i\.v\.|intravenous|intravenously|iv\s+push|iv\s+drip|iv\s+infusion|via\s+iv|"
+                    r"im|i\.m\.|intramuscular|intramuscularly|"
+                    r"oral|orally|po|p\.o\.|by\s+mouth|per\s+os|swallowed|"
+                    r"chewable|chewed|"
+                    r"sublingual|sublingually|sl|s\.l\.|under\s+the\s+tongue|"
+                    r"in|i\.n\.|intranasal|intranasally|nasal\s+spray|nasal|"
+                    r"nebulized|nebulizer|via\s+nebulizer|inhaled|inhalation|inhaler|puffs?|"
+                    r"io|i\.o\.|intraosseous|intraosseously|"
+                    r"sc|s\.c\.|sq|s\.q\.|sub-q|subq|subcutaneous|subcutaneously|"
+                    r"pr|p\.r\.|per\s+rectum|rectal|rectally|"
+                    r"topical|topically|transdermal|transdermally|patch|"
+                    r"buccal|buccally|"
+                    r"odt|orally\s+disintegrating"
+                    r")\b"
+                )
+                route_matches = list(re.finditer(route_pattern, surrounding))
                 route = None
-                if route_match:
-                    raw_r = route_match.group(1).upper()
-                    if raw_r in ["IV", "INTRAVENOUS"]:
+                if route_matches:
+                    best_route = min(route_matches, key=lambda rm: span_dist(rm.start(), rm.end()))
+                    raw_r = re.sub(r"[.\s]+", " ", best_route.group(1).lower().strip())
+                    if raw_r in ["iv", "i v", "intravenous", "intravenously", "iv push", "iv drip", "iv infusion", "via iv"]:
                         route = "IV"
-                    elif raw_r in ["IM", "INTRAMUSCULAR"]:
+                    elif raw_r in ["im", "i m", "intramuscular", "intramuscularly"]:
                         route = "IM"
-                    elif raw_r in ["ORAL", "ORALLY", "PO"]:
+                    elif raw_r in ["oral", "orally", "po", "p o", "by mouth", "per os", "swallowed"]:
                         route = "Oral"
-                    elif raw_r in ["SUBLINGUAL", "SL"]:
+                    elif raw_r in ["chewable", "chewed"]:
+                        route = "Chewable"
+                    elif raw_r in ["sublingual", "sublingually", "sl", "s l", "under the tongue"]:
                         route = "Sublingual"
-                    elif raw_r in ["IN", "INTRANASAL"]:
+                    elif raw_r in ["in", "i n", "intranasal", "intranasally", "nasal", "nasal spray"]:
                         route = "Intranasal"
-                    elif raw_r in ["NEBULIZED", "INHALED"]:
+                    elif raw_r in ["nebulized", "nebulizer", "via nebulizer", "inhaled", "inhalation", "inhaler", "puff", "puffs"]:
                         route = "Inhaled/Nebulized"
-                    elif raw_r in ["IO", "INTRAOSSEOUS"]:
+                    elif raw_r in ["io", "i o", "intraosseous", "intraosseously"]:
                         route = "IO"
+                    elif raw_r in ["sc", "s c", "sq", "s q", "sub-q", "subq", "subcutaneous", "subcutaneously"]:
+                        route = "SC"
+                    elif raw_r in ["pr", "p r", "per rectum", "rectal", "rectally"]:
+                        route = "PR"
+                    elif raw_r in ["topical", "topically", "transdermal", "transdermally", "patch"]:
+                        route = "Transdermal"
+                    elif raw_r in ["buccal", "buccally"]:
+                        route = "Buccal"
+                    elif raw_r in ["odt", "orally disintegrating"]:
+                        route = "ODT"
                     else:
-                        route = raw_r
+                        route = best_route.group(1).title()
 
-                # Match details from catalogue
-                match_result = MedicineService.match_medicine(name)
+                # Match details from catalogue with strength and route check
+                match_result = MedicineService.match_medicine(m.group(0), strength=dosage, route=route)
 
                 # Verification state
                 state = "Extracted"
@@ -337,7 +384,7 @@ class ClinicalExtractor:
 
                 medications.append({
                     "id": f"med-{uuid.uuid4().hex[:6]}",
-                    "raw_mention": name,
+                    "raw_mention": m.group(0),
                     "canonical_name": med_meta["canonical_name"],
                     "category": med_meta["category"],
                     "dosage": dosage,

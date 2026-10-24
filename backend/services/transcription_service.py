@@ -242,7 +242,7 @@ class TranscriptionService:
                             candidates = med_match.get("candidates", [])
                             req_verification = True
                             term_explanation = f"Ambiguous drug term. Human verification required among {len(candidates)} candidates."
-                        elif clean_token.lower() in ("bp", "pulse", "spo2", "gcs", "glucose", "temp", "mmhg", "bpm", "mg", "mcg", "ml", "iv", "im", "oral", "orally"):
+                        elif clean_token.lower() in ("bp", "pulse", "spo2", "gcs", "glucose", "temp", "mmhg", "bpm", "mg", "mcg", "ml", "g", "iv", "im", "io", "in", "sc", "sq", "pr", "po", "sl", "oral", "orally", "sublingual", "sublingually", "nebulized", "inhaled", "chewable"):
                             is_med = True
                             med_cat = "Measurement / Vital"
                             med_status = "MEASUREMENT"
